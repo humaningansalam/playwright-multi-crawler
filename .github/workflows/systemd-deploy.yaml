@@ -33,7 +33,7 @@ jobs:
             sed -i "s|your_user|${{ secrets.SERVER_USER }}|g" ${{ secrets.DEPLOY_PATH }}/playwright-multi-crawler.service
 
             # systemd 서비스 파일 복사 및 활성화
-            sudo cp ${{ sercrets.DEPLOY_PATH }}/playwright-multi-crawler.service /etc/systemd/system/
+            sudo cp ${{ secrets.DEPLOY_PATH }}/playwright-multi-crawler.service /etc/systemd/system/
             sudo systemctl daemon-reload
             sudo systemctl enable playwright-multi-crawler
             sudo systemctl restart playwright-multi-crawler
