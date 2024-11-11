@@ -1,0 +1,13 @@
+[Unit]
+Description=FastAPI Application Service
+After=network.target
+
+[Service]
+User=your_user 
+WorkingDirectory=/path/to/your/deployment/folder
+Environment="PATH=/home/your_user/.local/bin:/usr/local/bin:/usr/bin"
+ExecStart=poetry run python -m myapp.main
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

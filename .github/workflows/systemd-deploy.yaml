@@ -1,0 +1,39 @@
+name: Deploy FastAPI Application
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v2
+
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            # 배포 폴더로 이동 및 코드 업데이트
+            cd ${{ secrets.DEPLOY_PATH }}
+            git pull origin main
+
+            # Poetry 설치 및 Playwright 종속성 설치
+            portey install
+            poetry run playwright install-deps 
+            poetry run playwright install chromium
+
+
+            # 서비스 파일의 경로를 설정한 Secrets 변수를 사용해 동적으로 수정
+            sed -i "s|/path/to/your/deployment/folder|${{ secrets.DEPLOY_PATH }}|g" ${{ secrets.DEPLOY_PATH }}/playwright-multi-crawler.service
+            sed -i "s|your_user|${{ secrets.SERVER_USER }}|g" ${{ secrets.DEPLOY_PATH }}/playwright-multi-crawler.service
+
+            # systemd 서비스 파일 복사 및 활성화
+            sudo cp ${{ sercrets.DEPLOY_PATH }}/playwright-multi-crawler.service /etc/systemd/system/
+            sudo systemctl daemon-reload
+            sudo systemctl enable playwright-multi-crawler
+            sudo systemctl restart playwright-multi-crawler
