@@ -1,4 +1,4 @@
-name: Deploy FastAPI Application
+name: Deploy playwight-multi-crawler systemd
 
 on:
   workflow_dispatch:
