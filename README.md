@@ -37,5 +37,5 @@ curl -X POST http://localhost:5000/submit \
 예시 스크립트는 examples/crawl.py를 참고해주세요.
 
 
-##라이선스
+## 라이선스
 이 프로젝트는 MIT 라이선스를 따릅니다. 자세한 내용은 LICENSE 파일을 참고하세요.
