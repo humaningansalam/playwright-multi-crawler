@@ -3,6 +3,8 @@ import logging
 import os
 import importlib.util
 import uuid
+import traceback
+from pyvirtualdisplay import Display
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
@@ -18,6 +20,7 @@ queue = asyncio.Queue()
 submitted_jobs = set()
 job_results = {}
 job_futures = {}
+submitted_jobs_lock = asyncio.Lock()  # 중복 작업 방지용 Lock
 
 app = FastAPI()
 
@@ -26,6 +29,7 @@ playwright: Playwright = None
 browser: Browser = None
 context: BrowserContext = None
 workers = []
+display = Display(visible=1, backend="xephyr", size=(1920, 1080))
 
 # 외부 크롤링 스크립트를 동적으로 불러와 실행하는 함수
 async def process_job(page, script_path, jobname, job_id):
@@ -37,7 +41,6 @@ async def process_job(page, script_path, jobname, job_id):
         external_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(external_module)
 
-        # 스크립트에 'crawl' 함수가 있는지 확인 후 실행
         if hasattr(external_module, 'crawl'):
             result = await external_module.crawl(page)
             job_results[job_id] = result
@@ -54,8 +57,10 @@ async def process_job(page, script_path, jobname, job_id):
         if job_id in job_futures:
             job_futures[job_id].set_result(error_result)
         logging.error(f"Error processing job '{jobname}' with script {script_path}: {e}")
+        logging.error(traceback.format_exc())  # 전체 오류 스택 추적 추가
     finally:
-        submitted_jobs.discard(jobname)
+        async with submitted_jobs_lock:
+            submitted_jobs.discard(jobname)
 
 # 작업 디스패처
 async def dispatch_job(job):
@@ -63,7 +68,6 @@ async def dispatch_job(job):
     jobname = job['jobname']
     job_id = job['job_id']
 
-    # 페이지 생성 및 작업 처리
     page = await context.new_page()
     logging.debug(f"New tab created for job '{jobname}'")
     await process_job(page, script_path, jobname, job_id)
@@ -79,7 +83,6 @@ async def worker():
         await dispatch_job(job)
         queue.task_done()
 
-# FastAPI 이벤트 핸들러: 애플리케이션 시작 시 실행
 @app.on_event("startup")
 async def startup_event():
     global playwright, browser, context, workers
@@ -87,6 +90,7 @@ async def startup_event():
     if not os.path.exists(JOB_FOLDER):
         os.makedirs(JOB_FOLDER)
 
+    display.start()  # 가상 디스플레이 시작
     playwright = await async_playwright().start()
     logging.info("Launching Playwright browser...")
     browser = await playwright.chromium.launch(headless=False)
@@ -99,7 +103,6 @@ async def startup_event():
 
     workers = [asyncio.create_task(worker()) for _ in range(MAX_CONCURRENT_TASKS)]
 
-# FastAPI 이벤트 핸들러: 애플리케이션 종료 시 실행
 @app.on_event("shutdown")
 async def shutdown_event():
     for _ in range(MAX_CONCURRENT_TASKS):
@@ -109,8 +112,8 @@ async def shutdown_event():
     await context.close()
     await browser.close()
     await playwright.stop()
+    display.stop()  # 가상 디스플레이 종료
 
-# 작업 제출 후 결과 대기
 @app.post("/submit")
 async def submit_job(
     jobname: str = Form(...),
@@ -119,11 +122,12 @@ async def submit_job(
     if not jobname or not script_file:
         return JSONResponse({'error': 'Jobname and script file are required'}, status_code=400)
 
-    if jobname in submitted_jobs:
-        return JSONResponse({'status': 'Duplicate job, ignored'}, status_code=409)
+    async with submitted_jobs_lock:
+        if jobname in submitted_jobs:
+            return JSONResponse({'status': 'Duplicate job, ignored'}, status_code=409)
+        submitted_jobs.add(jobname)
 
     job_id = str(uuid.uuid4())
-    submitted_jobs.add(jobname)
     script_path = os.path.join(JOB_FOLDER, script_file.filename)
 
     contents = await script_file.read()
@@ -142,6 +146,5 @@ async def submit_job(
 
     return {'status': 'Job completed', 'result': result, 'job_id': job_id}
 
-# `__main__` 블록에서 FastAPI 애플리케이션 실행
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=5000)
