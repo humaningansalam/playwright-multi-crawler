@@ -34,13 +34,23 @@ jobs:
             poetry run playwright install-deps 
             poetry run playwright install chromium
 
+            # systemd 서비스 파일 생성
+            echo "[Unit]
+            Description=Playwright Multi Crawler Service
+            After=network.target
 
-            # 서비스 파일의 경로를 설정한 Secrets 변수를 사용해 동적으로 수정
-            sed -i "s|/path/to/your/deployment/folder|${{ secrets.DEPLOY_PATH }}|g" ${{ secrets.DEPLOY_PATH }}/config/playwright-multi-crawler.service
-            sed -i "s|your_user|${{ secrets.SERVER_USER }}|g" ${{ secrets.DEPLOY_PATH }}/config/playwright-multi-crawler.service
+            [Service]
+            Type=simple
+            User=${{ secrets.SERVER_USER }}
+            WorkingDirectory=${{ secrets.DEPLOY_PATH }}
+            Environment="PATH=/home/${{ secrets.SERVER_USER }}/.local/bin:/usr/local/bin:/usr/bin"
+            ExecStart=poetry run python -m myapp.main
+            Restart=always
 
-            # systemd 서비스 파일 복사 및 활성화
-            sudo cp ${{ secrets.DEPLOY_PATH }}/config/playwright-multi-crawler.service /etc/systemd/system/
+            [Install]
+            WantedBy=multi-user.target" | sudo tee /etc/systemd/system/playwright-multi-crawler.service
+
+            # systemd 데몬 다시 로드하고 서비스 시작
             sudo systemctl daemon-reload
             sudo systemctl enable playwright-multi-crawler
             sudo systemctl restart playwright-multi-crawler
