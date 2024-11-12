@@ -30,7 +30,7 @@ jobs:
             fi
 
             # Poetry 설치 및 Playwright 종속성 설치
-            portry install
+            poetry install
             poetry run playwright install-deps 
             poetry run playwright install chromium
 
