@@ -41,6 +41,7 @@ jobs:
             [Service]
             Type=simple
             User=${{ secrets.SERVER_USER }}
+            Environment="DISPLAY=:0"
             WorkingDirectory=${{ secrets.DEPLOY_PATH }}
             ExecStart=/home/${{ secrets.SERVER_USER }}/.local/bin/poetry run python -m myapp.main
             Restart=on-failure
