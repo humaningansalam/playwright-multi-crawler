@@ -30,8 +30,8 @@ jobs:
             fi
 
             # 실행 권한 부여
-            chmod +x ./config/run_script_tistory_autopost.sh
             chmod +x ./config/install_dependencies.sh
+            ./config/install_dependencies.sh
 
             # systemd 서비스 파일 생성
             echo "[Unit]
