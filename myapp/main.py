@@ -4,9 +4,11 @@ import os
 import importlib.util
 import uuid
 import traceback
+import shutil
+from datetime import datetime, timedelta
 from pyvirtualdisplay import Display
 from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
 import uvicorn
 
@@ -14,6 +16,8 @@ import uvicorn
 logging.basicConfig(level=logging.INFO)
 MAX_CONCURRENT_TASKS = 3
 JOB_FOLDER = 'submitted_jobs'
+JOB_RETENTION_DAYS = 3  # 작업 폴더 보존 기간 (일)
+CLEANUP_INTERVAL_HOURS = 24  # 폴더 정리 주기 (시간 단위)
 
 # 큐 및 중복 작업 추적
 queue = asyncio.Queue()
@@ -30,6 +34,21 @@ browser: Browser = None
 context: BrowserContext = None
 workers = []
 display = Display(visible=1, backend="xephyr", size=(1920, 1080))
+
+# 오래된 작업 폴더 삭제 함수
+def clean_old_jobs():
+    cutoff = datetime.now() - timedelta(days=JOB_RETENTION_DAYS)
+    for jobname in os.listdir(JOB_FOLDER):
+        job_path = os.path.join(JOB_FOLDER, jobname)
+        if os.path.isdir(job_path) and datetime.fromtimestamp(os.path.getmtime(job_path)) < cutoff:
+            shutil.rmtree(job_path, ignore_errors=True)
+            logging.info(f"Deleted old job folder: {job_path}")
+
+# 주기적으로 하루에 한 번 폴더 정리하는 비동기 작업
+async def periodic_cleanup():
+    while True:
+        clean_old_jobs()
+        await asyncio.sleep(CLEANUP_INTERVAL_HOURS * 3600)  # 하루 대기 후 다시 실행
 
 # 외부 크롤링 스크립트를 동적으로 불러와 실행하는 함수
 async def process_job(page, script_path, jobname, job_id):
@@ -90,6 +109,9 @@ async def startup_event():
     if not os.path.exists(JOB_FOLDER):
         os.makedirs(JOB_FOLDER)
 
+    # 오래된 작업 폴더 주기적으로 정리
+    asyncio.create_task(periodic_cleanup())
+
     display.start()  # 가상 디스플레이 시작
     playwright = await async_playwright().start()
     logging.info("Launching Playwright browser...")
@@ -128,8 +150,10 @@ async def submit_job(
         submitted_jobs.add(jobname)
 
     job_id = str(uuid.uuid4())
-    script_path = os.path.join(JOB_FOLDER, script_file.filename)
+    job_path = os.path.join(JOB_FOLDER, job_id)
+    os.makedirs(job_path, exist_ok=True)
 
+    script_path = os.path.join(job_path, "script.py")
     contents = await script_file.read()
     with open(script_path, 'wb') as f:
         f.write(contents)
@@ -141,10 +165,20 @@ async def submit_job(
     await queue.put(job)
     logging.debug(f"Job '{jobname}' added to the queue with ID: {job_id}")
 
+    # 작업 완료 시 결과와 파일 다운로드 URL 반환
     result = await future
     del job_futures[job_id]
 
-    return {'status': 'Job completed', 'result': result, 'job_id': job_id}
+    files = {filename: f"/api/download/{job_id}/{filename}" for filename in os.listdir(job_path)}
+    return {'status': 'Job completed', 'result': result, 'job_id': job_id, 'files': files}
+
+@app.get("/api/download/{job_id}/{filename}")
+async def download_file(job_id: str, filename: str):
+    """개별 파일 다운로드 처리"""
+    file_path = os.path.join(JOB_FOLDER, job_id, filename)
+    if not os.path.isfile(file_path):
+        return JSONResponse({'error': 'File not found'}, status_code=404)
+    return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=5000)
