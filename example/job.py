@@ -6,13 +6,12 @@ def submit_job(url):
         "script_file": open("crawl.py", "rb"),
         "additional_files": open("image1.png", "rb"),  # 추가 파일 예시 1
     }
-    # 두 번째 추가 파일 (필요시 추가)
-    additional_files = [("additional_files", open("textfile.txt", "rb"))]
+
     data = {
         "jobname": "crawl_naver"
     }
 
-    response = requests.post(url+'/submit', files={**files, **dict(additional_files)}, data=data)
+    response = requests.post(url+'/submit', files={**files}, data=data)
 
     # 응답 상태 및 내용 출력
     if response.status_code == 200:

@@ -35,6 +35,7 @@ curl 명령어
 curl -X POST http://localhost:5000/submit \
      -F "jobname=crawl_job" \
      -F "script_file=@crawl.py"
+     -F "additional_files=@textfile.txt"
 ```
 예시 스크립트는 examples/crawl.py를 참고해주세요.
 
