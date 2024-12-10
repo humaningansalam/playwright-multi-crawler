@@ -140,6 +140,7 @@ async def shutdown_event():
 async def submit_job(
     jobname: str = Form(...),
     script_file: UploadFile = File(...),
+    additional_files: List[UploadFile] = File(None)  # 추가 파일 받기
 ):
     if not jobname or not script_file:
         return JSONResponse({'error': 'Jobname and script file are required'}, status_code=400)
@@ -153,10 +154,19 @@ async def submit_job(
     job_path = os.path.join(JOB_FOLDER, job_id)
     os.makedirs(job_path, exist_ok=True)
 
+    # script_file 저장
     script_path = os.path.join(job_path, "script.py")
-    contents = await script_file.read()
+    script_contents = await script_file.read()
     with open(script_path, 'wb') as f:
-        f.write(contents)
+        f.write(script_contents)
+
+    # additional_files 저장
+    if additional_files:
+        for add_file in additional_files:
+            content = await add_file.read()
+            add_file_path = os.path.join(job_path, add_file.filename)
+            with open(add_file_path, 'wb') as f:
+                f.write(content)
 
     future = asyncio.Future()
     job_futures[job_id] = future
@@ -165,7 +175,7 @@ async def submit_job(
     await queue.put(job)
     logging.debug(f"Job '{jobname}' added to the queue with ID: {job_id}")
 
-    # 작업 완료 시 결과와 파일 다운로드 URL 반환
+    # 작업 완료 대기
     result = await future
     del job_futures[job_id]
 
