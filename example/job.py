@@ -7,31 +7,40 @@ def submit_job(url):
         ("script_file", open("crawl.py", "rb"))  # 필수 파일
     ]
 
-    # 추가 파일이 존재하면 추가
-    if os.path.exists("image"):
-        files_to_send.append(("additional_files", open("image", "rb")))  # 추가 파일 1
+    # 추가 파일 경로 및 이름
+    additional_files_paths = [
+        ("image", "image"),  # (파일 경로, 파일 이름)
+        ("cookies.json", "cookies.json")
+    ]
 
-    if os.path.exists("cookies.json"):
-        files_to_send.append(("additional_files", open("cookies.json", "rb")))  # 추가 파일 2
+    for file_path, file_name in additional_files_paths:
+        if os.path.exists(file_path):
+            try:
+                files_to_send.append(
+                    ("additional_files", (file_name, open(file_path, "rb")))
+                )
+            except FileNotFoundError:
+                print(f"Error: File not found: {file_path}")
 
     data = {
         "jobname": "crawl_naver"  # 작업 이름
     }
 
     # POST 요청으로 서버에 작업 제출
+    print("Submitting job...")
     response = requests.post(f"{url}/submit", files=files_to_send, data=data)
 
     # 응답 상태 및 내용 출력
     if response.status_code == 200:
         result = response.json()
         job_id = result.get("job_id")
-        print("Job submitted with ID:", job_id)
+        print(f"Job submitted with ID: {job_id}")
         print("Result:", result)
 
         # 파일 다운로드 호출
         download_files(url, job_id, result.get("files", {}))
     else:
-        print("Failed to submit job:", response.text)
+        print(f"Failed to submit job: {response.text}") 
 
 def download_files(url, job_id, files):
     """파일 다운로드 함수"""
