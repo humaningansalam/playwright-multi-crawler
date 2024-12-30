@@ -11,6 +11,10 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
 import uvicorn
+import time
+
+os.environ['TZ'] = 'Asia/Seoul'
+time.tzset() 
 
 # 설정
 logging.basicConfig(level=logging.INFO)
