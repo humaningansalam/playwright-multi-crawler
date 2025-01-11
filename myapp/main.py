@@ -6,6 +6,7 @@ import uuid
 import traceback
 import shutil
 from datetime import datetime, timedelta
+from typing import List
 from pyvirtualdisplay import Display
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
@@ -144,7 +145,7 @@ async def shutdown_event():
 async def submit_job(
     jobname: str = Form(...),
     script_file: UploadFile = File(...),
-    additional_files: List[UploadFile] = File(None)  # 추가 파일 받기
+    additional_files: List[UploadFile] = File(default=[])
 ):
     if not jobname or not script_file:
         return JSONResponse({'error': 'Jobname and script file are required'}, status_code=400)
@@ -158,33 +159,46 @@ async def submit_job(
     job_path = os.path.join(JOB_FOLDER, job_id)
     os.makedirs(job_path, exist_ok=True)
 
+    logging.info(f"Processing job {job_id}: Saving script file {script_file.filename}")
+    
     # script_file 저장
-    script_path = os.path.join(job_path, "script.py")
+    script_path = os.path.join(job_path, 'script.py') 
     script_contents = await script_file.read()
     with open(script_path, 'wb') as f:
         f.write(script_contents)
 
     # additional_files 저장
-    if additional_files:
-        for add_file in additional_files:
-            content = await add_file.read()
-            add_file_path = os.path.join(job_path, add_file.filename)
-            with open(add_file_path, 'wb') as f:
-                f.write(content)
+    for add_file in additional_files:
+        logging.info(f"Saving additional file: {add_file.filename}")
+        content = await add_file.read()
+        add_file_path = os.path.join(job_path, add_file.filename)
+        with open(add_file_path, 'wb') as f:
+            f.write(content)
 
     future = asyncio.Future()
     job_futures[job_id] = future
 
     job = {'script_path': script_path, 'jobname': jobname, 'job_id': job_id}
     await queue.put(job)
-    logging.debug(f"Job '{jobname}' added to the queue with ID: {job_id}")
+    logging.info(f"Job '{jobname}' queued with ID: {job_id}")
 
     # 작업 완료 대기
     result = await future
     del job_futures[job_id]
 
-    files = {filename: f"/api/download/{job_id}/{filename}" for filename in os.listdir(job_path)}
-    return {'status': 'Job completed', 'result': result, 'job_id': job_id, 'files': files}
+    # 실제 파일만 포함하여 다운로드 URL 생성
+    files = {
+        filename: f"/api/download/{job_id}/{filename}"
+        for filename in os.listdir(job_path)
+        if os.path.isfile(os.path.join(job_path, filename))
+    }
+    
+    return {
+        'status': 'Job completed', 
+        'result': result, 
+        'job_id': job_id, 
+        'files': files
+    }
 
 @app.get("/api/download/{job_id}/{filename}")
 async def download_file(job_id: str, filename: str):
