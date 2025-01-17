@@ -24,9 +24,9 @@ jobs:
             cd ${{ secrets.DEPLOY_PATH }}
 
             if [ ! -d ".git" ]; then
-              git clone https://github.com/humaningansalam/playwright-multi-crawler.git .
+              git clone https://github.com/${{ github.repository }}.git .
             else
-              git pull origin main
+              git reset --hard origin/main 
             fi
 
             # 실행 권한 부여
