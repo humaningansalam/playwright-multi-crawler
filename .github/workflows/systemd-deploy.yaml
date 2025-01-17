@@ -11,6 +11,10 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v2
 
+      - name: Create .env file
+        run: |
+          echo "PORT=${{ vars.SERVER_PORT }}" > .env
+
       - name: Deploy to server
         uses: appleboy/ssh-action@v0.1.6
         with:
@@ -29,6 +33,9 @@ jobs:
               git reset --hard origin/main 
             fi
 
+            # .env 파일 복사
+            cp .env ${{ secrets.DEPLOY_PATH }}/myapp/.env
+
             # 실행 권한 부여
             chmod +x ./config/install_dependencies.sh
             ./config/install_dependencies.sh
@@ -43,7 +50,7 @@ jobs:
             User=${{ secrets.SERVER_USER }}
             Environment=DISPLAY=:10.0
             WorkingDirectory=${{ secrets.DEPLOY_PATH }}
-            ExecStart=/home/${{ secrets.SERVER_USER }}/.local/bin/poetry run python -m myapp.main PORT=${{ vars.SERVER_PORT }}
+            ExecStart=/home/${{ secrets.SERVER_USER }}/.local/bin/poetry run python -m myapp.main
             Restart=on-failure
             RestartSec=10  
             StartLimitInterval=30

@@ -13,6 +13,9 @@ from fastapi.responses import JSONResponse, FileResponse
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
 import uvicorn
 import time
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '.env'))
 
 os.environ['TZ'] = 'Asia/Seoul'
 time.tzset() 
