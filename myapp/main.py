@@ -13,9 +13,10 @@ from fastapi.responses import JSONResponse, FileResponse
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
 import uvicorn
 import time
+import json
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '.env'))
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '../.env'))
 
 os.environ['TZ'] = 'Asia/Seoul'
 time.tzset() 
@@ -26,6 +27,7 @@ MAX_CONCURRENT_TASKS = 3
 JOB_FOLDER = 'submitted_jobs'
 JOB_RETENTION_DAYS = 3  # 작업 폴더 보존 기간 (일)
 CLEANUP_INTERVAL_HOURS = 24  # 폴더 정리 주기 (시간 단위)
+CONTEXT_PATH = '../browser_context.json'  # 컨텍스트 저장 경로
 
 # 큐 및 중복 작업 추적
 queue = asyncio.Queue()
@@ -110,6 +112,20 @@ async def worker():
         await dispatch_job(job)
         queue.task_done()
 
+async def save_context(context, path):
+    state = await context.storage_state()
+    with open(path, 'w') as f:
+        json.dump(state, f)
+
+async def load_context(browser, path):
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            state = json.load(f)
+        context = await browser.new_context(storage_state=state)
+        return context
+    else:
+        return await browser.new_context()
+
 @app.on_event("startup")
 async def startup_event():
     global playwright, browser, context, workers
@@ -123,22 +139,23 @@ async def startup_event():
     display.start()  # 가상 디스플레이 시작
     playwright = await async_playwright().start()
     logging.info("Launching Playwright browser...")
-    browser = await playwright.chromium.launch(headless=False)
-    context = await browser.new_context()
+    browser = await playwright.chromium.launch(headless=False, args=['--start-maximized'])
+    context = await load_context(browser, CONTEXT_PATH) # 컨텍스트 불러오기
 
     page = await context.new_page()
     await page.goto('https://example.com', wait_until='networkidle')
     logging.info("Initial page loaded: https://example.com")
-    await page.close()
 
     workers = [asyncio.create_task(worker()) for _ in range(MAX_CONCURRENT_TASKS)]
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    global context
     for _ in range(MAX_CONCURRENT_TASKS):
         await queue.put(None)
     await asyncio.gather(*workers)
 
+    await save_context(context, CONTEXT_PATH) # 컨텍스트 저장
     await context.close()
     await browser.close()
     await playwright.stop()
@@ -210,6 +227,11 @@ async def download_file(job_id: str, filename: str):
     if not os.path.isfile(file_path):
         return JSONResponse({'error': 'File not found'}, status_code=404)
     return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
