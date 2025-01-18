@@ -65,13 +65,14 @@ async def process_job(page, script_path, jobname, job_id):
     try:
         logging.info(f"Starting job '{jobname}' with script: {script_path}")
 
-        # 외부 스크립트 동적 임포트
         spec = importlib.util.spec_from_file_location("external_module", script_path)
         external_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(external_module)
 
         if hasattr(external_module, 'crawl'):
-            result = await external_module.crawl(page)
+            context = page.context
+            job_path = os.path.dirname(script_path)
+            result = await external_module.crawl(page, context, job_path)
             job_results[job_id] = result
             logging.info(f"Job '{jobname}' completed with result: {result}")
             if job_id in job_futures:
@@ -86,7 +87,7 @@ async def process_job(page, script_path, jobname, job_id):
         if job_id in job_futures:
             job_futures[job_id].set_result(error_result)
         logging.error(f"Error processing job '{jobname}' with script {script_path}: {e}")
-        logging.error(traceback.format_exc())  # 전체 오류 스택 추적 추가
+        logging.error(traceback.format_exc())
     finally:
         async with submitted_jobs_lock:
             submitted_jobs.discard(jobname)
