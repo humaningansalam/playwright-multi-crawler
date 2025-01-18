@@ -11,10 +11,6 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v2
 
-      - name: Create .env file
-        run: |
-          echo "PORT=${{ vars.SERVER_PORT }}" > .env
-
       - name: Deploy to server
         uses: appleboy/ssh-action@v0.1.6
         with:
@@ -33,11 +29,12 @@ jobs:
             if [ ! -d ".git" ]; then
               git clone https://github.com/${{ github.repository }}.git .
             else
+              git fetch --all
               git reset --hard origin/main 
             fi
 
-            # .env 파일 복사
-            cp .env ${{ secrets.DEPLOY_PATH }}/myapp/.env
+            # .env 파일 생성
+            echo "PORT=${{ vars.SERVER_PORT }}" > ${{ secrets.DEPLOY_PATH }}/myapp/.env
 
             # 실행 권한 부여
             chmod +x ./config/install_dependencies.sh
