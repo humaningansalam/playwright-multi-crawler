@@ -9,8 +9,7 @@ sudo apt-get install -y \
 echo "Installing Python packages..."
 if command -v poetry &> /dev/null; then
     poetry install
-    poetry run playwright install-deps
-    poetry run playwright install chromium 
+    poetry run python -m playwright install --with-deps chromium
 else
     echo "Error: Poetry is not installed. Please install Poetry first."
     exit 1

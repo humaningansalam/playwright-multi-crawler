@@ -1,0 +1,52 @@
+name: Dev Docker Image CICD
+
+on:
+  push:
+    branches: [ "dev" ]
+  workflow_dispatch:
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4 # 최신 버전 사용
+
+      - name: Set up Python 
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true # 가상 환경 생성
+          virtualenvs-in-project: true # 프로젝트 폴더 내에 .venv 생성 (권장)
+
+      - name: Install dependencies 
+        run: poetry install --no-interaction 
+
+      - name: Install Playwright browsers and dependencies
+        run: |
+          poetry run python -m playwright install --with-deps chromium
+          # 필요한 다른 브라우저(firefox, webkit)도 설치 가능
+
+      - name: Run tests with pytest
+        run: |
+          # 필요한 환경 변수 설정 (테스트 환경용 .env 파일 사용 또는 직접 설정)
+          # export SOME_TEST_VARIABLE=test_value
+          poetry run python -m pytest -s
+
+      - name: action-slack
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          author_name: Gibhub Actions - build
+          fields: repo,commit,message,author # action,eventName,ref,workflow,job,took 추가할 수 있음
+          mention: here
+          if_mention: failure,cancelled
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_ALARM }} # required
+        if: always() # Pick up events even if the job fails or is canceled.

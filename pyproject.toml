@@ -1,9 +1,12 @@
 [tool.poetry]
 name = "playwright-multi-crawler"
-version = "0.1.11"
+version = "0.2.0"
 description = ""
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
+packages = [
+    {include = "src"}
+]
 
 [tool.poetry.dependencies]
 python = "==3.10.*"
@@ -12,6 +15,10 @@ uvicorn = "^0.32.0"
 python-multipart = "^0.0.17"
 pyvirtualdisplay = "^3.0"
 python-dotenv = "^1.0.1"
+dotenv = "^0.9.9"
+pytest = "^8.3.5"
+pytest-asyncio = "^0.26.0"
+httpx = "^0.28.1"
 
 [tool.poetry.group.dev.dependencies]
 playwright = "^1.48.0"
@@ -19,3 +26,7 @@ playwright = "^1.48.0"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+start = "src.main:main"
+test = "pytest:main"
