@@ -26,7 +26,7 @@ async def start() -> None:
     try:
         # 브라우저 실행 옵션 (필요시 config에서 가져오도록 수정)
         _browser = await _playwright.chromium.launch(
-            headless=True, # 서버 환경에서는 True 권장
+            headless=False, 
             args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
         )
         logging.info(f"Browser launched: {_browser.version}")

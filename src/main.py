@@ -1,8 +1,10 @@
 import asyncio
 import logging
+from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
+from playwright.async_api import Page
 
 # API 라우터 임포트
 from src.api import health as health_api
@@ -36,8 +38,17 @@ async def startup_event():
     await playwright_manager.start()
     # 워커 태스크 시작
     job_processor.start_workers()
-    # 주기적 정리 작업 시작 
+    # 주기적 정리 작업 시작드
     asyncio.create_task(tool_utils.periodic_cleanup(), name="PeriodicCleanupTask")
+    # 초기 페이지 로드
+    initial_page: Optional[Page] = None
+    try:
+        context = await playwright_manager.get_context()
+        if context:
+            initial_page = await context.new_page()
+            await initial_page.goto('https://example.com', wait_until='networkidle', timeout=30000)
+    except Exception as e:
+        logging.warning(f"Failed to load initial page 'https://example.com': {e}")
     logging.info("Application startup sequence completed.")
 
 @app.on_event("shutdown")

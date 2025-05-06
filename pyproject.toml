@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "playwright-multi-crawler"
-version = "0.2.0"
+version = "0.2.1"
 description = ""
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
@@ -28,5 +28,4 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
-start = "src.main:main"
 test = "pytest:main"

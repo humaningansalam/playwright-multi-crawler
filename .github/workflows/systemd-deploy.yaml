@@ -52,7 +52,7 @@ jobs:
             Type=simple
             User=${{ secrets.SERVER_USER }}
             WorkingDirectory=${{ secrets.DEPLOY_PATH }}
-            ExecStart=/home/${{ secrets.SERVER_USER }}/.local/bin/python -m src.main
+            ExecStart=/home/${{ secrets.SERVER_USER }}/.local/bin/poetry run python src/main.py
             Restart=on-failure
             RestartSec=10  
             StartLimitInterval=30
