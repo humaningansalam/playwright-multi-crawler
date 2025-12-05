@@ -11,8 +11,8 @@ from src.api import health as health_api
 from src.api import jobs as jobs_api
 from src.common import tool_utils
 # 핵심 모듈 임포트 (이벤트 핸들러에서 사용)
-from src.core import job_processor, playwright_manager
-
+from src.core import playwright_manager
+from src.worker import job_processor
 # 설정 및 로깅 설정 함수 임포트
 from src.config import HOST, LOG_LEVEL, PORT
 
@@ -40,15 +40,7 @@ async def startup_event():
     job_processor.start_workers()
     # 주기적 정리 작업 시작드
     asyncio.create_task(tool_utils.periodic_cleanup(), name="PeriodicCleanupTask")
-    # 초기 페이지 로드
-    initial_page: Optional[Page] = None
-    try:
-        context = await playwright_manager.get_context()
-        if context:
-            initial_page = await context.new_page()
-            await initial_page.goto('https://example.com', wait_until='networkidle', timeout=30000)
-    except Exception as e:
-        logging.warning(f"Failed to load initial page 'https://example.com': {e}")
+
     logging.info("Application startup sequence completed.")
 
 @app.on_event("shutdown")
@@ -82,4 +74,4 @@ async def read_root():
 # --- 실행 ---
 if __name__ == "__main__":
     logging.info(f"Starting Uvicorn server on {HOST}:{PORT}")
-    uvicorn.run("main:app", host=HOST, port=PORT, reload=True, log_level="info")
+    uvicorn.run("src.main:app", host=HOST, port=PORT, reload=True, log_level="info")
