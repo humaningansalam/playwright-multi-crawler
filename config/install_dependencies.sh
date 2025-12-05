@@ -7,11 +7,15 @@ sudo apt-get install -y \
         xserver-xephyr
 
 echo "Installing Python packages..."
-if command -v poetry &> /dev/null; then
-    poetry install
-    poetry run python -m playwright install --with-deps chromium
+if command -v uv &> /dev/null; then
+    echo "uv found. Syncing dependencies..."
+    uv sync
+    
+    echo "Installing Playwright browsers..."
+    uv run playwright install --with-deps chromium
 else
-    echo "Error: Poetry is not installed. Please install Poetry first."
+    echo "Error: uv is not installed. Please install uv first."
+    echo "You can install it by running: curl -LsSf https://astral.sh/uv/install.sh | sh"
     exit 1
 fi
 

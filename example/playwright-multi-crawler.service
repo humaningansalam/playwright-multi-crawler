@@ -6,7 +6,7 @@ After=network.target
 User=your_user 
 WorkingDirectory=/path/to/your/deployment/folder
 Environment="PATH=/home/your_user/.local/bin:/usr/local/bin:/usr/bin"
-ExecStart=poetry run python -m myapp.main
+ExecStart=uv run python -m myapp.main
 Restart=always
 
 [Install]
