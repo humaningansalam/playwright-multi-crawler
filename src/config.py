@@ -20,9 +20,21 @@ else:
     logging.warning("time.tzset() not available on this system.")
 
 # 설정 상수
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
-MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", 3))
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../'))
+
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
+LOKI_URL = os.getenv("LOKI_URL")
+LOKI_TAGS = {
+    "app": os.getenv("APP_NAME", "playwright-runner"),
+    "env": os.getenv("ENV", "production")
+}
+
+LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE_PATH = os.path.join(LOG_DIR, "app.log")
+
+MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", 3))
 JOB_FOLDER = os.path.join(PROJECT_ROOT, os.getenv('JOB_FOLDER', 'submitted_jobs'))
 #CONTEXT_PATH = os.path.join(PROJECT_ROOT, os.getenv('CONTEXT_PATH', 'browser_context.json'))
 JOB_RETENTION_DAYS = int(os.getenv("JOB_RETENTION_DAYS", 3))

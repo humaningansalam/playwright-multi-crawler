@@ -10,14 +10,17 @@ from typing import Dict, List, Any
 from src.core import state_manager as state
 from src.core import job_queue
 from src.config import MAX_CONCURRENT_TASKS, PROJECT_ROOT
+from src.common.metrics import metrics
 
 # 워커 스크립트의 절대 경로
-JOB_RUNNER_PATH = os.path.join(PROJECT_ROOT, "src", "core", "job_runner.py")
+JOB_RUNNER_PATH = os.path.join(PROJECT_ROOT, "src", "worker", "job_runner.py")
 
 _workers: List[asyncio.Task] = []
 
 async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     """서브프로세스를 통해 작업을 격리 실행"""
+    metrics.active_jobs.inc()
+
     start_time = time.time()
     logging.info(f"Starting job '{jobname}' (ID: {job_id}) via subprocess")
     
@@ -69,7 +72,13 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
             else:
                 raise ValueError("Empty stdout from worker")
 
+            if final_status == 'COMPLETED':
+                metrics.jobs_completed.inc()
+            else:
+                metrics.jobs_failed.inc()
+
         except (json.JSONDecodeError, ValueError) as e:
+            metrics.jobs_failed.inc()
             logging.error(f"Failed to parse worker output for job {job_id}. Raw stdout: {stdout_decoded}")
             result_data = {
                 'error': 'Worker output parsing failed',
@@ -83,6 +92,9 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
         result_data = {'error': str(e), 'traceback': traceback.format_exc()}
     
     finally:
+        metrics.active_jobs.dec()
+        metrics.queued_jobs.set(job_queue.qsize())
+
         end_time = time.time()
         duration = end_time - start_time
         logging.info(f"Job '{jobname}' (ID: {job_id}) finished with status {final_status} in {duration:.2f}s")

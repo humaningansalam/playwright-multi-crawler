@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from src.core import state_manager as state
 from src.core import job_queue
 from src.config import JOB_FOLDER
+from src.common.metrics import metrics
 # models 임포트 
 from src.models.job import JobSubmitResponse, JobStatusResponse, JobResultResponse, JobProcessingResponse
 
@@ -96,11 +97,12 @@ async def submit_job_endpoint(
     await state.set_initial_status(job_id, jobname, job_path)
     job_data = {'script_path': script_path, 'jobname': jobname, 'job_id': job_id}
     await job_queue.add_job(job_data)
+    
+    metrics.jobs_submitted.inc()
+    metrics.queued_jobs.set(job_queue.qsize())
+    
     logging.info(f"Job '{jobname}' (ID: {job_id}) successfully queued.")
-
-    # Pydantic 모델 사용하여 응답 생성
     return JobSubmitResponse(job_id=job_id)
-
 
 @router.get("/status/{job_id}", response_model=JobStatusResponse)
 async def get_job_status_endpoint(job_id: str):

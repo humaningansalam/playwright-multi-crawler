@@ -116,24 +116,3 @@ def ensure_job_folder():
         except OSError as e:
             logging.error(f"Failed to create job folder {JOB_FOLDER}: {e}")
             raise
-
-def set_logging(log_level):
-    """
-    setting logging
-    """
-    # 로그 생성
-    logger = logging.getLogger()
-    # 로그 레벨 문자열을 적절한 로깅 상수로 변환
-    log_level_constant = getattr(logging, log_level, logging.INFO)
-    # 로그의 출력 기준 설정
-    logger.setLevel(log_level_constant)
-    # log 출력 형식
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    # log를 console에 출력
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
-    # log를 파일에 출력
-    #file_handler = logging.FileHandler('GoogleTrendsBot.log')
-    #file_handler.setFormatter(formatter)
-    #logger.addHandler(file_handler)

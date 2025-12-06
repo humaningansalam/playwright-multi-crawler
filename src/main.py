@@ -9,15 +9,24 @@ from playwright.async_api import Page
 # API 라우터 임포트
 from src.api import health as health_api
 from src.api import jobs as jobs_api
+from src.api import metrics as metrics_api
 from src.common import tool_utils
 # 핵심 모듈 임포트 (이벤트 핸들러에서 사용)
 from src.core import playwright_manager
 from src.worker import job_processor
 # 설정 및 로깅 설정 함수 임포트
-from src.config import HOST, LOG_LEVEL, PORT
+from src.config import HOST, LOG_LEVEL, PORT, LOKI_URL, LOKI_TAGS, LOG_FILE_PATH
+
+from his_mon import setup_logging, ResourceMonitor
+from src.common.metrics import metrics 
 
 # 로깅 설정 실행
-tool_utils.set_logging(LOG_LEVEL)
+setup_logging(
+    level=LOG_LEVEL,
+    loki_url=LOKI_URL,
+    tags=LOKI_TAGS,
+    log_file=LOG_FILE_PATH
+)
 
 # --- FastAPI 앱 생성 ---
 app = FastAPI(
@@ -30,6 +39,10 @@ app = FastAPI(
 async def startup_event():
     """애플리케이션 시작 시 실행"""
     logging.info("Application startup sequence initiated...")
+
+    # 리소스 모니터 시작
+    monitor = ResourceMonitor(metrics_obj=metrics, interval=5)
+    monitor.start()
     # 작업 폴더 확인/생성
     tool_utils.ensure_job_folder()
     # 가상 디스플레이 시작
@@ -65,6 +78,7 @@ async def shutdown_event():
 # --- API 라우터 포함 ---
 app.include_router(jobs_api.router) 
 app.include_router(health_api.router) 
+app.include_router(metrics_api.router)
 
 # --- 루트 경로  ---
 @app.get("/")

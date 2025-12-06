@@ -15,4 +15,7 @@ dependencies = [
     "python-multipart>=0.0.20",
     "pyvirtualdisplay>=3.0",
     "uvicorn>=0.38.0",
+    "his-monitoring",
 ]
+[tool.uv.sources]
+his-monitoring = { git = "https://github.com/humaningansalam/his-monitoring.git", branch = "main" }
