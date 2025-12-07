@@ -52,7 +52,7 @@ jobs:
             Type=simple
             User=${{ secrets.SERVER_USER }}
             WorkingDirectory=${{ secrets.DEPLOY_PATH }}
-            ExecStart=/home/${{ secrets.SERVER_USER }}/.local/bin/uv run python src/main.py
+            ExecStart=/home/${{ secrets.SERVER_USER }}/.local/bin/uv run python -m src.main
             Restart=on-failure
             RestartSec=10  
             StartLimitInterval=30
