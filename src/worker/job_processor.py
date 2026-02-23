@@ -5,17 +5,62 @@ import os
 import sys
 import json
 import traceback
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 from src.core import state_manager as state
 from src.core import job_queue
-from src.config import MAX_CONCURRENT_TASKS, PROJECT_ROOT
+from src.config import MAX_CONCURRENT_TASKS, PROJECT_ROOT, JOB_TIMEOUT_SECONDS
 from src.common.metrics import metrics
 
 # 워커 스크립트의 절대 경로
 JOB_RUNNER_PATH = os.path.join(PROJECT_ROOT, "src", "worker", "job_runner.py")
+RESULT_FILENAME = "result.json"
 
 _workers: List[asyncio.Task] = []
+
+
+def _build_fallback_result(stdout: str, stderr: str, error: str, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "error": error,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+    if timeout_seconds is not None:
+        result["timeout_seconds"] = timeout_seconds
+    return result
+
+
+async def _read_result_file(job_path: str) -> Optional[Dict[str, Any]]:
+    result_path = os.path.join(job_path, RESULT_FILENAME)
+    if not os.path.exists(result_path):
+        return None
+    try:
+        with open(result_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logging.error(f"Failed to read {RESULT_FILENAME} in {job_path}: {e}")
+        return None
+
+
+async def _terminate_process(proc: asyncio.subprocess.Process, job_id: str) -> None:
+    if proc.returncode is not None:
+        return
+    logging.warning(f"Job {job_id} exceeded timeout. Terminating subprocess.")
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        return
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
+    except asyncio.TimeoutError:
+        logging.warning(f"Job {job_id} did not exit after SIGTERM. Killing subprocess.")
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
+        await proc.wait()
+
 
 async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     """서브프로세스를 통해 작업을 격리 실행"""
@@ -39,6 +84,9 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
 
     final_status = 'FAILED'
     result_data = None
+    stdout_decoded = ""
+    stderr_decoded = ""
+    timed_out = False
 
     try:
         # 서브프로세스 실행 (비동기)
@@ -48,48 +96,62 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
             stderr=asyncio.subprocess.PIPE
         )
 
-        # 프로세스 완료 대기 및 출력 캡처
-        stdout, stderr = await proc.communicate()
-        
+        # 프로세스 완료 대기 및 출력 캡처 (타임아웃 적용)
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=JOB_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            timed_out = True
+            await _terminate_process(proc, job_id)
+            stdout, stderr = await proc.communicate()
+
         stdout_decoded = stdout.decode().strip()
         stderr_decoded = stderr.decode().strip()
 
         if stderr_decoded:
             logging.warning(f"Job {job_id} stderr: {stderr_decoded}")
 
-        # JSON 결과 파싱
-        try:
-            # 마지막 줄이 JSON이라고 가정 (중간에 print가 섞일 경우를 대비해 로직 보강 가능)
-            output_lines = stdout_decoded.splitlines()
-            if output_lines:
-                output_json = json.loads(output_lines[-1])
-                final_status = output_json.get("status", "FAILED")
-                result_data = output_json.get("result")
-                error_info = output_json.get("error")
+        output_json = await _read_result_file(job_path)
+        if timed_out:
+            final_status = "FAILED"
+            result_data = _build_fallback_result(
+                stdout_decoded,
+                stderr_decoded,
+                "timeout",
+                timeout_seconds=JOB_TIMEOUT_SECONDS
+            )
+            if output_json is not None:
+                result_data["worker_result"] = output_json.get("result")
+                result_data["worker_error"] = output_json.get("error")
+        elif output_json is None:
+            result_data = _build_fallback_result(
+                stdout_decoded,
+                stderr_decoded,
+                "Worker output missing or invalid"
+            )
+        else:
+            final_status = output_json.get("status", "FAILED")
+            result_data = output_json.get("result")
+            error_info = output_json.get("error")
 
-                if final_status == "FAILED":
-                    result_data = error_info
-            else:
-                raise ValueError("Empty stdout from worker")
+            if final_status == "FAILED":
+                result_data = error_info
 
-            if final_status == 'COMPLETED':
-                metrics.jobs_completed.inc()
-            else:
-                metrics.jobs_failed.inc()
-
-        except (json.JSONDecodeError, ValueError) as e:
+        if final_status == 'COMPLETED':
+            metrics.jobs_completed.inc()
+        else:
             metrics.jobs_failed.inc()
-            logging.error(f"Failed to parse worker output for job {job_id}. Raw stdout: {stdout_decoded}")
-            result_data = {
-                'error': 'Worker output parsing failed',
-                'raw_stdout': stdout_decoded,
-                'stderr': stderr_decoded
-            }
 
     except Exception as e:
         logging.error(f"System error processing job '{jobname}' (ID: {job_id}): {e}")
         logging.error(traceback.format_exc())
-        result_data = {'error': str(e), 'traceback': traceback.format_exc()}
+        result_data = _build_fallback_result(
+            stdout_decoded,
+            stderr_decoded,
+            str(e)
+        )
     
     finally:
         metrics.active_jobs.dec()

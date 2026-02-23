@@ -23,6 +23,7 @@ except ImportError as e:
     pytest.exit(f"Failed to import application modules: {e}", returncode=1)
 
 tool_utils.set_logging("DEBUG")
+os.environ.setdefault("RUN_HEAVY_STARTUP", "false")
 
 @pytest.fixture(scope="session")
 def event_loop():
@@ -41,7 +42,7 @@ async def client():
     FastAPI 애플리케이션에 대한 비동기 테스트 클라이언트를 생성하는 픽스처입니다.
     'session' 범위는 테스트 세션 동안 클라이언트가 한 번만 생성되도록 합니다.
     """
-    transport = ASGITransport(app=app)
+    transport = ASGITransport(app=app, lifespan="on")
     # 'async with'를 사용하여 클라이언트의 생명주기를 관리합니다.
     # base_url은 테스트 시 요청 경로를 완전한 URL로 만들어줍니다.
     async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:

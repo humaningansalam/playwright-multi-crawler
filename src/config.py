@@ -39,6 +39,7 @@ JOB_FOLDER = os.path.join(PROJECT_ROOT, os.getenv('JOB_FOLDER', 'submitted_jobs'
 #CONTEXT_PATH = os.path.join(PROJECT_ROOT, os.getenv('CONTEXT_PATH', 'browser_context.json'))
 JOB_RETENTION_DAYS = int(os.getenv("JOB_RETENTION_DAYS", 3))
 CLEANUP_INTERVAL_HOURS = int(os.getenv("CLEANUP_INTERVAL_HOURS", 24))
+JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", 3600))
 PORT = int(os.environ.get("PORT", 5000))
 HOST = os.environ.get("HOST", "0.0.0.0")
 CDP_PORT = int(os.getenv("CDP_PORT", 9222))

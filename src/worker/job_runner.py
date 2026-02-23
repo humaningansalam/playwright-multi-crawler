@@ -13,6 +13,22 @@ sys.path.append(project_root)
 
 from src.config import CDP_URL
 
+RESULT_FILENAME = "result.json"
+
+
+def _write_result_atomic(job_path: str, output: dict) -> None:
+    result_path = os.path.join(job_path, RESULT_FILENAME)
+    tmp_path = f"{result_path}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(output, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, result_path)
+    except Exception as e:
+        sys.stderr.write(f"Failed to write {RESULT_FILENAME}: {e}\n")
+
+
 async def run_user_script(job_id, script_path, job_path):
     result_data = None
     error_info = None
@@ -55,22 +71,21 @@ async def run_user_script(job_id, script_path, job_path):
             if context: await context.close()
             if browser: await browser.disconnect()
 
-    # 결과 JSON 출력 (부모 프로세스가 읽음)
     output = {
         "status": "FAILED" if error_info else "COMPLETED",
         "result": result_data,
         "error": error_info
     }
-    print(json.dumps(output))
+    _write_result_atomic(job_path, output)
 
 if __name__ == "__main__":
     # 인자: [1]=job_id, [2]=script_path, [3]=job_path
     if len(sys.argv) < 4:
-        print(json.dumps({"status": "FAILED", "error": {"error": "Invalid arguments provided to worker"}}))
+        sys.stderr.write("Invalid arguments provided to worker\n")
         sys.exit(1)
         
     try:
         asyncio.run(run_user_script(sys.argv[1], sys.argv[2], sys.argv[3]))
     except Exception as e:
         # 런타임 자체 에러 캡처
-        print(json.dumps({"status": "FAILED", "error": {"error": f"Worker runtime error: {str(e)}"}}))
+        sys.stderr.write(f"Worker runtime error: {str(e)}\n")
