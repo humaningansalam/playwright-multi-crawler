@@ -38,6 +38,9 @@ jobs:
             # .env 파일 생성
             echo "PORT=${{ vars.SERVER_PORT }}" > ${{ secrets.DEPLOY_PATH }}/.env
             echo "DISPLAY=${{ vars.DISPLAY }}" >> ${{ secrets.DEPLOY_PATH }}/.env
+            echo "APP_NAME=${{ vars.APP_NAME }}" >> ${{ secrets.DEPLOY_PATH }}/.env
+            echo "APP_ENV=${{ vars.APP_ENV }}" >> ${{ secrets.DEPLOY_PATH }}/.env
+            echo "LOG_LEVEL=${{ vars.LOG_LEVEL }}" >> ${{ secrets.DEPLOY_PATH }}/.env
 
             # 실행 권한 부여
             chmod +x ./config/install_dependencies.sh

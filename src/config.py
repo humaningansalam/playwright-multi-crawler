@@ -26,7 +26,7 @@ LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 LOKI_URL = os.getenv("LOKI_URL")
 LOKI_TAGS = {
     "app": os.getenv("APP_NAME", "playwright-runner"),
-    "env": os.getenv("ENV", "production")
+    "env": os.getenv("APP_ENV", "dev")
 }
 
 LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
