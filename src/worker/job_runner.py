@@ -69,7 +69,7 @@ async def run_user_script(job_id, script_path, job_path):
             # 5. 리소스 정리 (브라우저는 끄지 않음)
             if page: await page.close()
             if context: await context.close()
-            if browser: await browser.disconnect()
+            if browser: await browser.close()
 
     output = {
         "status": "FAILED" if error_info else "COMPLETED",
