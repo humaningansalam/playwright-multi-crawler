@@ -1,0 +1,14 @@
+{
+  "name": "playwright-multi-crawler",
+  "image": "mcr.microsoft.com/playwright/python:v1.54.0-jammy",
+  "workspaceFolder": "/workspaces/playwright-multi-crawler",
+  "postCreateCommand": "python --version && pip install uv",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ]
+    }
+  }
+}
