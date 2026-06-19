@@ -39,17 +39,22 @@ async def lifespan(app: FastAPI):
     monitor.start()
     app.state.monitor = monitor
 
+    heavy_startup = os.getenv("RUN_HEAVY_STARTUP", "true").lower() == "true"
+
     # 작업 폴더 확인/생성
     tool_utils.ensure_job_folder()
     # 가상 디스플레이 시작
-    if os.getenv("RUN_HEAVY_STARTUP", "true").lower() == "true":
+    if heavy_startup:
         tool_utils.start_display()
         # Playwright 시작 및 브라우저/컨텍스트 준비
         await playwright_manager.start()
     else:
         logging.info("Skipping display/Playwright startup (RUN_HEAVY_STARTUP=false)")
     # 워커 태스크 시작
-    job_processor.start_workers()
+    if heavy_startup:
+        job_processor.start_workers()
+    else:
+        logging.info("Skipping worker startup (RUN_HEAVY_STARTUP=false)")
     # 주기적 정리 작업 시작
     app.state.cleanup_task = asyncio.create_task(
         tool_utils.periodic_cleanup(),
@@ -63,9 +68,10 @@ async def lifespan(app: FastAPI):
     finally:
         logging.info("Application shutdown sequence initiated...")
         # 워커 종료
-        await job_processor.stop_workers()
+        if heavy_startup:
+            await job_processor.stop_workers()
 
-        if os.getenv("RUN_HEAVY_STARTUP", "true").lower() == "true":
+        if heavy_startup:
             # Playwright 종료
             await playwright_manager.shutdown()
             # 가상 디스플레이 종료

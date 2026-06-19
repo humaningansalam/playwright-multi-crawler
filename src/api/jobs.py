@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 import uuid
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import List, Dict, Any, Optional
 
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, status, Depends
@@ -19,6 +20,23 @@ router = APIRouter(
     prefix="/api/jobs", # API 경로 접두사 설정
     tags=["Jobs"],      # Swagger UI 그룹화 태그
 )
+
+
+def _is_valid_additional_filename(filename: str) -> bool:
+    if not filename or os.path.isabs(filename):
+        return False
+
+    posix_path = PurePosixPath(filename)
+    windows_path = PureWindowsPath(filename)
+
+    if posix_path.name != filename or windows_path.name != filename:
+        return False
+
+    if posix_path.is_absolute() or windows_path.is_absolute():
+        return False
+
+    return ".." not in posix_path.parts and ".." not in windows_path.parts
+
 
 @router.post("/submit", status_code=status.HTTP_202_ACCEPTED, response_model=JobSubmitResponse)
 async def submit_job_endpoint(
@@ -67,7 +85,16 @@ async def submit_job_endpoint(
 
         # additional_files 저장
         for add_file in additional_files:
-            if add_file.filename: 
+            if add_file.filename:
+                if not _is_valid_additional_filename(add_file.filename):
+                    logging.warning(
+                        f"Rejected invalid additional file name {add_file.filename!r} for job {job_id}"
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid additional file name: {add_file.filename}",
+                    )
+
                 add_file_path = os.path.join(job_path, add_file.filename)
                 try:
                     logging.info(f"Saving additional file: {add_file.filename} for job {job_id}")

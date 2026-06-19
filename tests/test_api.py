@@ -4,6 +4,9 @@ import httpx
 import asyncio
 import os
 import time
+from pathlib import Path
+
+from src.config import JOB_FOLDER
 
 # 테스트용 간단한 스크립트 파일 내용
 DUMMY_SCRIPT_CONTENT = """
@@ -101,3 +104,109 @@ async def test_submit_duplicate_job(client: httpx.AsyncClient):
     # 두 번째 제출
     response2 = await client.post("/api/jobs/submit", data=data, files=files)
     assert response2.status_code == 409
+
+@pytest.mark.asyncio
+async def test_submit_additional_file_rejects_path_traversal(client: httpx.AsyncClient):
+    job_name = f"traversal_test_{int(time.time())}"
+    escaped_target = Path(JOB_FOLDER) / "evil.txt"
+    if escaped_target.exists():
+        escaped_target.unlink()
+
+    files = [
+        ('script_file', ('dummy_script.py', DUMMY_SCRIPT_CONTENT, 'text/x-python')),
+        ('additional_files', ('../evil.txt', 'malicious payload', 'text/plain')),
+    ]
+    data = {'jobname': job_name}
+
+    response = await client.post("/api/jobs/submit", data=data, files=files)
+
+    assert response.status_code == 400
+    assert "Invalid additional file name" in response.json()["detail"]
+    assert not escaped_target.exists()
+    if escaped_target.exists():
+        escaped_target.unlink()
+
+
+@pytest.mark.asyncio
+async def test_lightweight_lifespan_skips_workers(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
+    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display"))
+    monkeypatch.setattr("src.common.tool_utils.stop_display", lambda: calls.append("stop_display"))
+    async def fake_playwright_start():
+        calls.append("playwright_start")
+
+    async def fake_playwright_shutdown():
+        calls.append("playwright_shutdown")
+
+    monkeypatch.setattr("src.core.playwright_manager.start", fake_playwright_start)
+    monkeypatch.setattr("src.core.playwright_manager.shutdown", fake_playwright_shutdown)
+    monkeypatch.setattr("src.worker.job_processor.start_workers", lambda: calls.append("start_workers"))
+    async def fake_stop_workers():
+        calls.append("stop_workers")
+
+    monkeypatch.setattr("src.worker.job_processor.stop_workers", fake_stop_workers)
+    monkeypatch.setattr("src.common.tool_utils.periodic_cleanup", lambda: asyncio.sleep(0))
+    monkeypatch.setenv("RUN_HEAVY_STARTUP", "false")
+
+    import src.main as main
+
+    app = main.app
+    async with app.router.lifespan_context(app):
+        assert calls == ["ensure_job_folder"]
+
+    assert calls == ["ensure_job_folder"]
+
+
+@pytest.mark.asyncio
+async def test_heavy_lifespan_starts_workers(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
+    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display"))
+    monkeypatch.setattr("src.common.tool_utils.stop_display", lambda: calls.append("stop_display"))
+    async def fake_playwright_start():
+        calls.append("playwright_start")
+
+    async def fake_playwright_shutdown():
+        calls.append("playwright_shutdown")
+
+    monkeypatch.setattr("src.core.playwright_manager.start", fake_playwright_start)
+    monkeypatch.setattr("src.core.playwright_manager.shutdown", fake_playwright_shutdown)
+    monkeypatch.setattr("src.worker.job_processor.start_workers", lambda: calls.append("start_workers"))
+    async def fake_stop_workers():
+        calls.append("stop_workers")
+
+    monkeypatch.setattr("src.worker.job_processor.stop_workers", fake_stop_workers)
+    monkeypatch.setattr("src.common.tool_utils.periodic_cleanup", lambda: asyncio.sleep(0))
+    monkeypatch.setenv("RUN_HEAVY_STARTUP", "true")
+
+    import src.main as main
+
+    app = main.app
+    async with app.router.lifespan_context(app):
+        assert calls == ["ensure_job_folder", "start_display", "playwright_start", "start_workers"]
+
+    assert calls == ["ensure_job_folder", "start_display", "playwright_start", "start_workers", "stop_workers", "playwright_shutdown", "stop_display"]
+
+@pytest.mark.asyncio
+async def test_submit_additional_file_accepts_safe_filename(client: httpx.AsyncClient):
+    job_name = f"safe_additional_test_{int(time.time())}"
+    additional_name = "fixtures.txt"
+    additional_content = "safe payload"
+
+    files = [
+        ('script_file', ('dummy_script.py', DUMMY_SCRIPT_CONTENT, 'text/x-python')),
+        ('additional_files', (additional_name, additional_content, 'text/plain')),
+    ]
+    data = {'jobname': job_name}
+
+    response = await client.post("/api/jobs/submit", data=data, files=files)
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    job_dir = Path(JOB_FOLDER) / job_id
+    saved_file = job_dir / additional_name
+    assert saved_file.exists()
+    assert saved_file.read_text() == additional_content
