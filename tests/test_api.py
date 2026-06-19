@@ -1,10 +1,10 @@
-import pytest
-import pytest_asyncio
-import httpx
 import asyncio
 import os
 import time
 from pathlib import Path
+
+import httpx
+import pytest
 
 from src.config import JOB_FOLDER
 

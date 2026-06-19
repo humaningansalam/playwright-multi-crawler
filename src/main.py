@@ -18,7 +18,7 @@ from src.worker import job_processor
 from src.config import HOST, LOG_LEVEL, PORT, LOKI_URL, LOKI_TAGS, LOG_FILE_PATH
 
 from his_mon import setup_logging, ResourceMonitor
-from src.common.metrics import metrics 
+from src.common.metrics import metrics
 
 # 로깅 설정 실행
 setup_logging(

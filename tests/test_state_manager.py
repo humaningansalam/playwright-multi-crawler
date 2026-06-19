@@ -1,5 +1,4 @@
 import pytest
-import pytest_asyncio
 import asyncio
 
 # 테스트 대상 모듈 임포트
