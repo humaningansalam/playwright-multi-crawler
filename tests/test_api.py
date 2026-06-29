@@ -5,8 +5,11 @@ from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from src.config import JOB_FOLDER
+from src.api.jobs import download_file_endpoint
+from src.core import state_manager as state
 
 # 테스트용 간단한 스크립트 파일 내용
 DUMMY_SCRIPT_CONTENT = """
@@ -24,6 +27,17 @@ async def test_health_check(client: httpx.AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
+    assert data["browser_connected"] is False
+    assert data["queued_tasks"] == 0
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint(client: httpx.AsyncClient):
+    response = await client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "python_info" in response.text
 
 @pytest.mark.asyncio
 async def test_submit_job_accepted(client: httpx.AsyncClient):
@@ -75,6 +89,33 @@ async def test_get_results_for_pending_job(client: httpx.AsyncClient):
     assert result_data["status"] in ["PENDING", "RUNNING"] # PENDING 또는 RUNNING 상태 기대
     assert "message" in result_data
 
+
+@pytest.mark.asyncio
+async def test_get_completed_results_lists_downloadable_files(client: httpx.AsyncClient, tmp_path):
+    job_id = "completed-download-test"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    result_file = job_dir / "output.txt"
+    result_file.write_text("crawl output", encoding="utf-8")
+
+    await state.set_initial_status(job_id, "completed_download_test", str(job_dir))
+    await state.update_job_status(job_id, "COMPLETED", result={"ok": True}, duration=1.25)
+
+    results_response = await client.get(f"/api/jobs/results/{job_id}")
+
+    assert results_response.status_code == 200
+    result_data = results_response.json()
+    assert result_data["status"] == "COMPLETED"
+    assert result_data["result"] == {"ok": True}
+    assert result_data["files"] == {
+        "output.txt": f"/api/jobs/download/{job_id}/output.txt"
+    }
+
+    download_response = await client.get(f"/api/jobs/download/{job_id}/output.txt")
+    assert download_response.status_code == 200
+    assert download_response.content == b"crawl output"
+
+
 @pytest.mark.asyncio
 async def test_get_status_not_found(client: httpx.AsyncClient):
     """존재하지 않는 job_id 상태 조회 시 404 반환 테스트"""
@@ -125,6 +166,23 @@ async def test_submit_additional_file_rejects_path_traversal(client: httpx.Async
     assert not escaped_target.exists()
     if escaped_target.exists():
         escaped_target.unlink()
+
+
+@pytest.mark.asyncio
+async def test_download_rejects_sibling_prefix_traversal(tmp_path):
+    job_id = "download-prefix-traversal"
+    job_dir = tmp_path / "jobA"
+    sibling_dir = tmp_path / "jobA2"
+    job_dir.mkdir()
+    sibling_dir.mkdir()
+    (sibling_dir / "secret.txt").write_text("secret", encoding="utf-8")
+
+    await state.set_initial_status(job_id, "download_prefix_test", str(job_dir))
+
+    with pytest.raises(HTTPException) as exc:
+        await download_file_endpoint(job_id, "../jobA2/secret.txt")
+
+    assert exc.value.status_code == 403
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@ import logging
 import os
 import shutil
 import uuid
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Dict, Any, Optional
 
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, status, Depends
@@ -203,13 +203,10 @@ async def download_file_endpoint(job_id: str, filename: str):
          logging.error(f"Job path not found in state for job ID {job_id}")
          raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job path configuration missing")
 
-    file_path = os.path.join(job_path, filename)
+    job_dir = Path(job_path).resolve()
+    file_path = (job_dir / filename).resolve()
 
-    # 경로 조작 방지 (상위 디렉토리 접근 등)
-    # job_path를 기준으로 절대 경로화하여 비교
-    abs_job_path = os.path.abspath(job_path)
-    abs_file_path = os.path.abspath(file_path)
-    if not abs_file_path.startswith(abs_job_path):
+    if not file_path.is_relative_to(job_dir):
          logging.warning(f"Attempted directory traversal: {filename} for job {job_id}")
          raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
@@ -219,7 +216,7 @@ async def download_file_endpoint(job_id: str, filename: str):
 
     # FileResponse 사용하여 파일 스트리밍
     return FileResponse(
-        file_path,
+        str(file_path),
         media_type="application/octet-stream", # 일반적인 바이너리 파일 타입
         filename=filename # 다운로드 시 사용될 파일 이름
     )

@@ -167,13 +167,14 @@ def get_job_results(job_id: str) -> Optional[Dict[str, Any]]:
         if response.status_code == 404:
             logging.error(f"Error: Job ID {job_id} not found when fetching results.")
             return None
-        if response.status_code == 202:
-             logging.warning(f"Job {job_id} is still processing according to results endpoint.")
-             return response.json() 
 
         response.raise_for_status() 
 
         results_data = response.json()
+        if results_data.get('status') in ['PENDING', 'RUNNING']:
+            logging.warning(f"Job {job_id} is still processing according to results endpoint.")
+            return results_data
+
         logging.info(f"Successfully fetched results for job {job_id}.")
 
         # 결과 출력 

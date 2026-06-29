@@ -55,7 +55,13 @@ curl http://localhost:5000/api/jobs/status/<job_id>
 curl http://localhost:5000/api/jobs/results/<job_id>
 ```
 
-예시 스크립트는 `examples/crawl.py`를 참고해주세요.
+결과 파일 다운로드
+
+```bash
+curl -OJ http://localhost:5000/api/jobs/download/<job_id>/<filename>
+```
+
+예시 스크립트는 `example/crawl.py`를 참고해주세요.
 
 ## 라이선스
 이 프로젝트는 MIT 라이선스를 따릅니다. 자세한 내용은 LICENSE 파일을 참고하세요.
