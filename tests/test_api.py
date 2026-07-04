@@ -1,5 +1,6 @@
 import asyncio
 import os
+import tomllib
 import time
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from fastapi import HTTPException
 from src.config import JOB_FOLDER
 from src.api.jobs import download_file_endpoint
 from src.core import state_manager as state
+from src.main import app
 
 # 테스트용 간단한 스크립트 파일 내용
 DUMMY_SCRIPT_CONTENT = """
@@ -19,6 +21,12 @@ async def crawl(page, context, job_path):
     await asyncio.sleep(0.1) # 아주 짧은 작업 시간
     return {'status': 'success'}
 """
+
+
+def _pyproject_version() -> str:
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    with pyproject_path.open("rb") as handle:
+        return tomllib.load(handle)["project"]["version"]
 
 @pytest.mark.asyncio
 async def test_health_check(client: httpx.AsyncClient):
@@ -38,6 +46,22 @@ async def test_metrics_endpoint(client: httpx.AsyncClient):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
     assert "python_info" in response.text
+
+
+@pytest.mark.asyncio
+async def test_openapi_metrics_200_content_type():
+    responses = app.openapi()["paths"]["/metrics"]["get"]["responses"]["200"]["content"]
+    assert "text/plain" in responses
+
+
+@pytest.mark.asyncio
+async def test_openapi_job_download_200_content_type():
+    responses = app.openapi()["paths"]["/api/jobs/download/{job_id}/{filename}"]["get"]["responses"]["200"]["content"]
+    assert "application/octet-stream" in responses
+
+
+def test_openapi_info_version_matches_pyproject():
+    assert app.openapi()["info"]["version"] == _pyproject_version()
 
 @pytest.mark.asyncio
 async def test_submit_job_accepted(client: httpx.AsyncClient):

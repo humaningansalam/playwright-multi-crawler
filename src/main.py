@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import os
+import tomllib
+from importlib.metadata import PackageNotFoundError, version as package_version
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -27,6 +30,22 @@ setup_logging(
     tags=LOKI_TAGS,
     log_file=LOG_FILE_PATH
 )
+
+
+def _get_app_version() -> str:
+    """Load API version from installed package metadata with a local fallback."""
+    try:
+        return package_version("playwright-multi-crawler")
+    except PackageNotFoundError:
+        pass
+
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    try:
+        with pyproject_path.open("rb") as handle:
+            project_config = tomllib.load(handle)
+        return project_config["project"]["version"]
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        return "0.0.0"
 
 # --- FastAPI 앱 생성 ---
 @asynccontextmanager
@@ -92,6 +111,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Playwright Job Runner API",
     description="API for submitting and managing Playwright browser automation jobs.",
+    version=_get_app_version(),
     lifespan=lifespan
 )
 

@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Dict, Any, Optional
 
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, status, Depends
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 
 # core 및 common 모듈 임포트
 from src.core import state_manager as state
@@ -191,7 +191,20 @@ async def get_job_results_endpoint(job_id: str):
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Unknown job status: {status_val}")
 
 
-@router.get("/download/{job_id}/{filename}")
+@router.get(
+    "/download/{job_id}/{filename}",
+    response_class=FileResponse,
+    responses={
+        200: {
+            "description": "Result file download",
+            "content": {
+                "application/octet-stream": {
+                    "schema": {"type": "string", "format": "binary"}
+                }
+            },
+        }
+    },
+)
 async def download_file_endpoint(job_id: str, filename: str):
     """개별 결과 파일을 다운로드합니다."""
     job_info = await state.get_job_info(job_id)
