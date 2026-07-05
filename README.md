@@ -39,7 +39,7 @@ uv run pytest -q
 ```bash
 curl -X POST http://localhost:5000/api/jobs/submit \
      -F "jobname=crawl_job" \
-     -F "script_file=@crawl.py" \
+     -F "script_file=@example/crawl.py" \
      -F "additional_files=@textfile.txt"
 ```
 
