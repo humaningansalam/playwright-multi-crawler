@@ -70,6 +70,19 @@ def test_openapi_job_results_200_documents_response_models():
     }
 
 
+def test_openapi_job_routes_document_error_responses():
+    openapi = app.openapi()
+
+    assert {"400", "409"} <= set(openapi["paths"]["/api/jobs/submit"]["post"]["responses"])
+    assert "404" in openapi["paths"]["/api/jobs/status/{job_id}"]["get"]["responses"]
+    assert "404" in openapi["paths"]["/api/jobs/results/{job_id}"]["get"]["responses"]
+    assert {"403", "404"} <= set(openapi["paths"]["/api/jobs/download/{job_id}/{filename}"]["get"]["responses"])
+
+    detail_schema = openapi["paths"]["/api/jobs/status/{job_id}"]["get"]["responses"]["404"]["content"]["application/json"]["schema"]
+    assert detail_schema["required"] == ["detail"]
+    assert detail_schema["properties"]["detail"]["type"] == "string"
+
+
 def test_openapi_info_version_matches_pyproject():
     assert app.openapi()["info"]["version"] == _pyproject_version()
 

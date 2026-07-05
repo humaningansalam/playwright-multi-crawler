@@ -22,6 +22,21 @@ router = APIRouter(
 )
 
 
+def _error_response(description: str) -> Dict[str, Any]:
+    return {
+        "description": description,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["detail"],
+                    "properties": {"detail": {"type": "string"}},
+                }
+            }
+        },
+    }
+
+
 def _is_valid_additional_filename(filename: str) -> bool:
     if not filename or os.path.isabs(filename):
         return False
@@ -38,7 +53,15 @@ def _is_valid_additional_filename(filename: str) -> bool:
     return ".." not in posix_path.parts and ".." not in windows_path.parts
 
 
-@router.post("/submit", status_code=status.HTTP_202_ACCEPTED, response_model=JobSubmitResponse)
+@router.post(
+    "/submit",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=JobSubmitResponse,
+    responses={
+        400: _error_response("Invalid job submission"),
+        409: _error_response("Duplicate active job name"),
+    },
+)
 async def submit_job_endpoint(
     jobname: str = Form(...),
     script_file: UploadFile = File(...),
@@ -131,7 +154,11 @@ async def submit_job_endpoint(
     logging.info(f"Job '{jobname}' (ID: {job_id}) successfully queued.")
     return JobSubmitResponse(job_id=job_id)
 
-@router.get("/status/{job_id}", response_model=JobStatusResponse)
+@router.get(
+    "/status/{job_id}",
+    response_model=JobStatusResponse,
+    responses={404: _error_response("Job not found")},
+)
 async def get_job_status_endpoint(job_id: str):
     """특정 작업의 현재 상태를 조회합니다."""
     status_val = await state.get_job_status(job_id)
@@ -140,7 +167,14 @@ async def get_job_status_endpoint(job_id: str):
     return JobStatusResponse(job_id=job_id, status=status_val)
 
 
-@router.get("/results/{job_id}", response_model=Union[JobProcessingResponse, JobResultResponse])
+@router.get(
+    "/results/{job_id}",
+    response_model=Union[JobProcessingResponse, JobResultResponse],
+    responses={
+        404: _error_response("Job not found"),
+        500: _error_response("Unknown job status"),
+    },
+)
 async def get_job_results_endpoint(job_id: str):
     """
     특정 작업의 결과를 조회합니다.
@@ -201,7 +235,9 @@ async def get_job_results_endpoint(job_id: str):
                     "schema": {"type": "string", "format": "binary"}
                 }
             },
-        }
+        },
+        403: _error_response("Access denied"),
+        404: _error_response("Job or file not found"),
     },
 )
 async def download_file_endpoint(job_id: str, filename: str):
