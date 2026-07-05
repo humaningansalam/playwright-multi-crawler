@@ -3,7 +3,7 @@ import os
 import shutil
 import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, status, Depends
 from fastapi.responses import FileResponse
@@ -140,8 +140,7 @@ async def get_job_status_endpoint(job_id: str):
     return JobStatusResponse(job_id=job_id, status=status_val)
 
 
-# 응답 모델을 동적으로 선택하기 위해 response_model 사용하지 않음 
-@router.get("/results/{job_id}")
+@router.get("/results/{job_id}", response_model=Union[JobProcessingResponse, JobResultResponse])
 async def get_job_results_endpoint(job_id: str):
     """
     특정 작업의 결과를 조회합니다.

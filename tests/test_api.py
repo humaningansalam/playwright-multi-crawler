@@ -60,6 +60,16 @@ async def test_openapi_job_download_200_content_type():
     assert "application/octet-stream" in responses
 
 
+def test_openapi_job_results_200_documents_response_models():
+    schema = app.openapi()["paths"]["/api/jobs/results/{job_id}"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+
+    refs = {entry["$ref"] for entry in schema["anyOf"]}
+    assert refs == {
+        "#/components/schemas/JobProcessingResponse",
+        "#/components/schemas/JobResultResponse",
+    }
+
+
 def test_openapi_info_version_matches_pyproject():
     assert app.openapi()["info"]["version"] == _pyproject_version()
 
