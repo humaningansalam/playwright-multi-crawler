@@ -39,9 +39,10 @@ uv run pytest -q
 ```bash
 curl -X POST http://localhost:5000/api/jobs/submit \
      -F "jobname=crawl_job" \
-     -F "script_file=@example/crawl.py" \
-     -F "additional_files=@textfile.txt"
+     -F "script_file=@example/crawl.py"
 ```
+
+추가 입력 파일이 필요한 스크립트는 `-F "additional_files=@<file-path>"` 옵션을 반복해서 함께 전달할 수 있습니다.
 
 작업 상태 확인
 

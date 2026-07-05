@@ -15,3 +15,9 @@ def test_readme_submit_example_uses_bundled_crawl_script():
     readme = Path(__file__).resolve().parents[1] / "README.md"
 
     assert '-F "script_file=@example/crawl.py"' in readme.read_text(encoding="utf-8")
+
+
+def test_readme_submit_example_does_not_require_missing_additional_file():
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+
+    assert '@textfile.txt' not in readme.read_text(encoding="utf-8")
