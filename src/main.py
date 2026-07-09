@@ -127,5 +127,6 @@ async def read_root():
 
 # --- 실행 ---
 if __name__ == "__main__":
+    reload_enabled = os.getenv("UVICORN_RELOAD", "false").lower() == "true"
     logging.info(f"Starting Uvicorn server on {HOST}:{PORT}")
-    uvicorn.run("src.main:app", host=HOST, port=PORT, reload=True, log_level="info")
+    uvicorn.run("src.main:app", host=HOST, port=PORT, reload=reload_enabled, log_level="info")

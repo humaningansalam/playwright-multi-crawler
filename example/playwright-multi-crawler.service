@@ -1,6 +1,6 @@
 [Unit]
 Description=FastAPI Application Service
-After=network.target
+After=network.target graphical.target
 
 [Service]
 User=your_user 
@@ -10,4 +10,4 @@ ExecStart=uv run python -m src.main
 Restart=always
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target
