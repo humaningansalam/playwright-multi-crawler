@@ -1,0 +1,38 @@
+import importlib.util
+import inspect
+from pathlib import Path
+
+from example.job import default_crawl_script_path
+
+
+def test_example_client_default_crawl_script_exists():
+    script_path = Path(default_crawl_script_path())
+
+    assert script_path.name == "crawl.py"
+    assert script_path.exists()
+    assert script_path.parent.name == "example"
+
+
+def test_readme_submit_example_uses_bundled_crawl_script():
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+
+    assert '-F "script_file=@example/crawl.py"' in readme.read_text(encoding="utf-8")
+
+
+def test_readme_submit_example_does_not_require_missing_additional_file():
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+
+    assert '@textfile.txt' not in readme.read_text(encoding="utf-8")
+
+
+def test_bundled_example_is_importable_with_worker_loader():
+    script_path = Path(__file__).resolve().parents[1] / "example" / "crawl.py"
+    spec = importlib.util.spec_from_file_location("example_crawl", str(script_path))
+    assert spec is not None
+    assert spec.loader is not None
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.crawl.__name__ == "crawl"
+    assert inspect.iscoroutinefunction(module.crawl)

@@ -49,7 +49,7 @@ jobs:
             # systemd 서비스 파일 생성
             echo "[Unit]
             Description=Playwright Multi Crawler Service
-            After=network.target
+            After=network.target graphical.target
 
             [Service]
             Type=simple
@@ -62,9 +62,9 @@ jobs:
             StartLimitBurst=5  
 
             [Install]
-            WantedBy=multi-user.target" | sudo tee /etc/systemd/system/playwright-multi-crawler.service
+            WantedBy=graphical.target" | sudo tee /etc/systemd/system/playwright-multi-crawler.service
 
             # systemd 데몬 다시 로드하고 서비스 시작
             sudo systemctl daemon-reload
-            sudo systemctl enable playwright-multi-crawler
+            sudo systemctl reenable playwright-multi-crawler
             sudo systemctl restart playwright-multi-crawler

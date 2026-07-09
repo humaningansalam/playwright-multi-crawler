@@ -1,13 +1,13 @@
 [Unit]
 Description=FastAPI Application Service
-After=network.target
+After=network.target graphical.target
 
 [Service]
 User=your_user 
 WorkingDirectory=/path/to/your/deployment/folder
 Environment="PATH=/home/your_user/.local/bin:/usr/local/bin:/usr/bin"
-ExecStart=uv run python -m myapp.main
+ExecStart=uv run python -m src.main
 Restart=always
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target

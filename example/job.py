@@ -14,6 +14,10 @@ SERVER_URL = os.getenv('PLAYWRIGHT_URL', 'http://localhost:5000')
 POLL_INTERVAL_SECONDS = 10 # 상태 확인 간격 
 MAX_POLL_ATTEMPTS = 60 # 최대 상태 확인 횟수 
 
+def default_crawl_script_path() -> str:
+    return str(Path(__file__).with_name("crawl.py"))
+
+
 def submit_job(script_path: str, job_name: str, additional_files_info: Optional[List[Dict[str, str]]] = None) -> Optional[str]:
     """
     서버에 작업을 제출하고 job_id를 반환합니다.
@@ -167,13 +171,14 @@ def get_job_results(job_id: str) -> Optional[Dict[str, Any]]:
         if response.status_code == 404:
             logging.error(f"Error: Job ID {job_id} not found when fetching results.")
             return None
-        if response.status_code == 202:
-             logging.warning(f"Job {job_id} is still processing according to results endpoint.")
-             return response.json() 
 
         response.raise_for_status() 
 
         results_data = response.json()
+        if results_data.get('status') in ['PENDING', 'RUNNING']:
+            logging.warning(f"Job {job_id} is still processing according to results endpoint.")
+            return results_data
+
         logging.info(f"Successfully fetched results for job {job_id}.")
 
         # 결과 출력 
@@ -255,7 +260,7 @@ def download_files(job_id: str, files_dict: Dict[str, str]):
 
 if __name__ == "__main__":
     # --- 사용 예시 ---
-    crawl_script_to_submit = "crawl.py" 
+    crawl_script_to_submit = default_crawl_script_path()
     unique_job_name = "naver_news_crawl"
 
     # 추가 파일 정보 (필요한 경우)

@@ -1,4 +1,11 @@
 
+import logging
+import os
+import traceback
+
+from playwright.async_api import BrowserContext, Page
+
+
 async def crawl(page: Page, context: BrowserContext, job_path: str):
     """
     지정된 페이지에서 데이터를 크롤링하고 결과를 반환하는 예제 함수.

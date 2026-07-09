@@ -2,10 +2,11 @@ import logging
 import os
 import shutil
 import uuid
-from typing import List, Dict, Any, Optional
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import List, Dict, Any, Optional, Union
 
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, status, Depends
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 
 # core 및 common 모듈 임포트
 from src.core import state_manager as state
@@ -20,7 +21,47 @@ router = APIRouter(
     tags=["Jobs"],      # Swagger UI 그룹화 태그
 )
 
-@router.post("/submit", status_code=status.HTTP_202_ACCEPTED, response_model=JobSubmitResponse)
+
+def _error_response(description: str) -> Dict[str, Any]:
+    return {
+        "description": description,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["detail"],
+                    "properties": {"detail": {"type": "string"}},
+                }
+            }
+        },
+    }
+
+
+def _is_valid_additional_filename(filename: str) -> bool:
+    if not filename or os.path.isabs(filename):
+        return False
+
+    posix_path = PurePosixPath(filename)
+    windows_path = PureWindowsPath(filename)
+
+    if posix_path.name != filename or windows_path.name != filename:
+        return False
+
+    if posix_path.is_absolute() or windows_path.is_absolute():
+        return False
+
+    return ".." not in posix_path.parts and ".." not in windows_path.parts
+
+
+@router.post(
+    "/submit",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=JobSubmitResponse,
+    responses={
+        400: _error_response("Invalid job submission"),
+        409: _error_response("Duplicate active job name"),
+    },
+)
 async def submit_job_endpoint(
     jobname: str = Form(...),
     script_file: UploadFile = File(...),
@@ -67,7 +108,16 @@ async def submit_job_endpoint(
 
         # additional_files 저장
         for add_file in additional_files:
-            if add_file.filename: 
+            if add_file.filename:
+                if not _is_valid_additional_filename(add_file.filename):
+                    logging.warning(
+                        f"Rejected invalid additional file name {add_file.filename!r} for job {job_id}"
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid additional file name: {add_file.filename}",
+                    )
+
                 add_file_path = os.path.join(job_path, add_file.filename)
                 try:
                     logging.info(f"Saving additional file: {add_file.filename} for job {job_id}")
@@ -104,7 +154,11 @@ async def submit_job_endpoint(
     logging.info(f"Job '{jobname}' (ID: {job_id}) successfully queued.")
     return JobSubmitResponse(job_id=job_id)
 
-@router.get("/status/{job_id}", response_model=JobStatusResponse)
+@router.get(
+    "/status/{job_id}",
+    response_model=JobStatusResponse,
+    responses={404: _error_response("Job not found")},
+)
 async def get_job_status_endpoint(job_id: str):
     """특정 작업의 현재 상태를 조회합니다."""
     status_val = await state.get_job_status(job_id)
@@ -113,8 +167,14 @@ async def get_job_status_endpoint(job_id: str):
     return JobStatusResponse(job_id=job_id, status=status_val)
 
 
-# 응답 모델을 동적으로 선택하기 위해 response_model 사용하지 않음 
-@router.get("/results/{job_id}")
+@router.get(
+    "/results/{job_id}",
+    response_model=Union[JobProcessingResponse, JobResultResponse],
+    responses={
+        404: _error_response("Job not found"),
+        500: _error_response("Unknown job status"),
+    },
+)
 async def get_job_results_endpoint(job_id: str):
     """
     특정 작업의 결과를 조회합니다.
@@ -164,7 +224,22 @@ async def get_job_results_endpoint(job_id: str):
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Unknown job status: {status_val}")
 
 
-@router.get("/download/{job_id}/{filename}")
+@router.get(
+    "/download/{job_id}/{filename}",
+    response_class=FileResponse,
+    responses={
+        200: {
+            "description": "Result file download",
+            "content": {
+                "application/octet-stream": {
+                    "schema": {"type": "string", "format": "binary"}
+                }
+            },
+        },
+        403: _error_response("Access denied"),
+        404: _error_response("Job or file not found"),
+    },
+)
 async def download_file_endpoint(job_id: str, filename: str):
     """개별 결과 파일을 다운로드합니다."""
     job_info = await state.get_job_info(job_id)
@@ -176,13 +251,10 @@ async def download_file_endpoint(job_id: str, filename: str):
          logging.error(f"Job path not found in state for job ID {job_id}")
          raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job path configuration missing")
 
-    file_path = os.path.join(job_path, filename)
+    job_dir = Path(job_path).resolve()
+    file_path = (job_dir / filename).resolve()
 
-    # 경로 조작 방지 (상위 디렉토리 접근 등)
-    # job_path를 기준으로 절대 경로화하여 비교
-    abs_job_path = os.path.abspath(job_path)
-    abs_file_path = os.path.abspath(file_path)
-    if not abs_file_path.startswith(abs_job_path):
+    if not file_path.is_relative_to(job_dir):
          logging.warning(f"Attempted directory traversal: {filename} for job {job_id}")
          raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
@@ -192,7 +264,7 @@ async def download_file_endpoint(job_id: str, filename: str):
 
     # FileResponse 사용하여 파일 스트리밍
     return FileResponse(
-        file_path,
+        str(file_path),
         media_type="application/octet-stream", # 일반적인 바이너리 파일 타입
         filename=filename # 다운로드 시 사용될 파일 이름
     )
