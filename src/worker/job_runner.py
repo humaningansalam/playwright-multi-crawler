@@ -57,6 +57,10 @@ async def run_user_script(job_id, script_path, job_path):
             # 4. crawl 함수 실행
             if hasattr(user_module, 'crawl') and asyncio.iscoroutinefunction(user_module.crawl):
                 result_data = await user_module.crawl(page, context, job_path)
+
+                # crawl이 {"error": ...}를 반환하면 실패로 간주
+                if isinstance(result_data, dict) and result_data.get("error"):
+                    error_info = result_data
             else:
                 raise AttributeError("The script must contain an async function named 'crawl'.")
 
