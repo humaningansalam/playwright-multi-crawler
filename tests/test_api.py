@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from src.config import JOB_FOLDER
+from src.api import jobs as jobs_api
 from src.api.jobs import download_file_endpoint
 from src.core import state_manager as state
 from src.main import app
@@ -28,6 +29,26 @@ def _pyproject_version() -> str:
     pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     with pyproject_path.open("rb") as handle:
         return tomllib.load(handle)["project"]["version"]
+
+
+@pytest.mark.asyncio
+async def test_upload_save_reads_bounded_chunks(tmp_path):
+    class _ChunkedUpload:
+        def __init__(self):
+            self.read_sizes = []
+            self.chunks = iter((b"first", b"second", b""))
+
+        async def read(self, size):
+            self.read_sizes.append(size)
+            return next(self.chunks)
+
+    upload = _ChunkedUpload()
+    destination = tmp_path / "upload.bin"
+
+    await jobs_api._save_upload_file(upload, str(destination))
+
+    assert upload.read_sizes == [jobs_api.UPLOAD_CHUNK_BYTES] * 3
+    assert destination.read_bytes() == b"firstsecond"
 
 @pytest.mark.asyncio
 async def test_health_check_reports_ready_service(client: httpx.AsyncClient, monkeypatch):

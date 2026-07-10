@@ -23,6 +23,7 @@ router = APIRouter(
 )
 
 RESERVED_JOB_FILENAMES = {"script.py", "result.json", "result.json.tmp"}
+UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 def _error_response(description: str) -> Dict[str, Any]:
@@ -80,6 +81,12 @@ def _validate_additional_filenames(additional_files: List[UploadFile]) -> None:
         seen_filenames.add(filename)
 
 
+async def _save_upload_file(upload_file: UploadFile, destination: str) -> None:
+    with open(destination, "wb") as output_file:
+        while chunk := await upload_file.read(UPLOAD_CHUNK_BYTES):
+            output_file.write(chunk)
+
+
 @router.post(
     "/submit",
     status_code=status.HTTP_202_ACCEPTED,
@@ -133,9 +140,7 @@ async def submit_job_endpoint(
         script_filename = "script.py" # 일관성을 위해 고정된 이름 사용
         script_path = os.path.join(job_path, script_filename)
         try:
-            script_contents = await script_file.read()
-            with open(script_path, 'wb') as f:
-                f.write(script_contents)
+            await _save_upload_file(script_file, script_path)
             logging.info(f"Saved script file for job {job_id} to {script_path}")
         except Exception as e:
             logging.error(f"Failed to save script file for job {job_id}: {e}")
@@ -149,9 +154,7 @@ async def submit_job_endpoint(
                 add_file_path = os.path.join(job_path, add_file.filename)
                 try:
                     logging.info(f"Saving additional file: {add_file.filename} for job {job_id}")
-                    content = await add_file.read()
-                    with open(add_file_path, 'wb') as f:
-                        f.write(content)
+                    await _save_upload_file(add_file, add_file_path)
                 except Exception as e:
                     logging.error(f"Failed to save additional file {add_file.filename} for job {job_id}: {e}")
                     raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to save additional file: {add_file.filename}") from e
