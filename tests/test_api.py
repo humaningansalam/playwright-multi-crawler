@@ -216,6 +216,38 @@ async def test_submit_additional_file_rejects_path_traversal(client: httpx.Async
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["script.py", "result.json", "result.json.tmp"])
+async def test_submit_rejects_reserved_additional_filenames(client: httpx.AsyncClient, filename):
+    response = await client.post(
+        "/api/jobs/submit",
+        data={"jobname": f"reserved-{filename}"},
+        files=[
+            ("script_file", ("crawl.py", DUMMY_SCRIPT_CONTENT, "text/x-python")),
+            ("additional_files", (filename, "payload", "text/plain")),
+        ],
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": f"Reserved additional file name: {filename}"}
+
+
+@pytest.mark.asyncio
+async def test_submit_rejects_duplicate_additional_filenames(client: httpx.AsyncClient):
+    response = await client.post(
+        "/api/jobs/submit",
+        data={"jobname": "duplicate-additional-filename"},
+        files=[
+            ("script_file", ("crawl.py", DUMMY_SCRIPT_CONTENT, "text/x-python")),
+            ("additional_files", ("helper.py", "first", "text/x-python")),
+            ("additional_files", ("helper.py", "second", "text/x-python")),
+        ],
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Duplicate additional file name: helper.py"}
+
+
+@pytest.mark.asyncio
 async def test_download_rejects_sibling_prefix_traversal(tmp_path):
     job_id = "download-prefix-traversal"
     job_dir = tmp_path / "jobA"

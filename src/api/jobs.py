@@ -21,6 +21,8 @@ router = APIRouter(
     tags=["Jobs"],      # Swagger UI 그룹화 태그
 )
 
+RESERVED_JOB_FILENAMES = {"script.py", "result.json", "result.json.tmp"}
+
 
 def _error_response(description: str) -> Dict[str, Any]:
     return {
@@ -53,6 +55,30 @@ def _is_valid_additional_filename(filename: str) -> bool:
     return ".." not in posix_path.parts and ".." not in windows_path.parts
 
 
+def _validate_additional_filenames(additional_files: List[UploadFile]) -> None:
+    seen_filenames = set()
+    for add_file in additional_files:
+        filename = add_file.filename
+        if not filename:
+            continue
+        if not _is_valid_additional_filename(filename):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid additional file name: {filename}",
+            )
+        if filename in RESERVED_JOB_FILENAMES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Reserved additional file name: {filename}",
+            )
+        if filename in seen_filenames:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Duplicate additional file name: {filename}",
+            )
+        seen_filenames.add(filename)
+
+
 @router.post(
     "/submit",
     status_code=status.HTTP_202_ACCEPTED,
@@ -83,6 +109,8 @@ async def submit_job_endpoint(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Job workers are unavailable",
         )
+
+    _validate_additional_filenames(additional_files)
 
     # 중복 작업 이름 체크 및 등록
     if not await state.add_submitted_job(jobname):
@@ -117,15 +145,6 @@ async def submit_job_endpoint(
         # additional_files 저장
         for add_file in additional_files:
             if add_file.filename:
-                if not _is_valid_additional_filename(add_file.filename):
-                    logging.warning(
-                        f"Rejected invalid additional file name {add_file.filename!r} for job {job_id}"
-                    )
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Invalid additional file name: {add_file.filename}",
-                    )
-
                 add_file_path = os.path.join(job_path, add_file.filename)
                 try:
                     logging.info(f"Saving additional file: {add_file.filename} for job {job_id}")
