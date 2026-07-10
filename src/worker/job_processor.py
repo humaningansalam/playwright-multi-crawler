@@ -218,8 +218,15 @@ def start_workers():
 
 async def stop_workers():
     global _workers
-    if not _workers: return
+    if not _workers:
+        return
     await job_queue.put_shutdown_signal(len(_workers))
-    await job_queue.join(timeout=30.0)
-    await asyncio.gather(*_workers, return_exceptions=True)
-    _workers = []
+    try:
+        await job_queue.join(timeout=30.0)
+    except asyncio.TimeoutError:
+        logging.error("Worker queue did not drain within 30 seconds; cancelling workers.")
+        for worker in _workers:
+            worker.cancel()
+    finally:
+        await asyncio.gather(*_workers, return_exceptions=True)
+        _workers = []

@@ -12,6 +12,7 @@ from src.config import JOB_FOLDER
 from src.api.jobs import download_file_endpoint
 from src.core import state_manager as state
 from src.main import app
+from src.worker import job_processor
 
 # 테스트용 간단한 스크립트 파일 내용
 DUMMY_SCRIPT_CONTENT = """
@@ -347,6 +348,57 @@ async def test_heavy_lifespan_starts_workers(monkeypatch):
         assert calls == ["ensure_job_folder", "start_display", "playwright_start", "start_workers"]
 
     assert calls == ["ensure_job_folder", "start_display", "playwright_start", "start_workers", "stop_workers", "playwright_shutdown", "stop_display"]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_completes_teardown_when_worker_shutdown_fails(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
+    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display"))
+    monkeypatch.setattr("src.common.tool_utils.stop_display", lambda: calls.append("stop_display"))
+    monkeypatch.setattr("src.worker.job_processor.start_workers", lambda: calls.append("start_workers"))
+    monkeypatch.setattr("src.common.tool_utils.periodic_cleanup", lambda: asyncio.sleep(0))
+    monkeypatch.setenv("RUN_HEAVY_STARTUP", "true")
+
+    async def fake_playwright_start():
+        calls.append("playwright_start")
+
+    async def fake_playwright_shutdown():
+        calls.append("playwright_shutdown")
+
+    async def failing_stop_workers():
+        calls.append("stop_workers")
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr("src.core.playwright_manager.start", fake_playwright_start)
+    monkeypatch.setattr("src.core.playwright_manager.shutdown", fake_playwright_shutdown)
+    monkeypatch.setattr("src.worker.job_processor.stop_workers", failing_stop_workers)
+
+    async with app.router.lifespan_context(app):
+        pass
+
+    assert calls == ["ensure_job_folder", "start_display", "playwright_start", "start_workers", "stop_workers", "playwright_shutdown", "stop_display"]
+
+
+@pytest.mark.asyncio
+async def test_stop_workers_cancels_workers_after_queue_timeout(monkeypatch):
+    worker = asyncio.create_task(asyncio.Event().wait())
+    job_processor._workers = [worker]
+
+    async def fake_put_shutdown_signal(_count):
+        return None
+
+    async def timeout_join(*_args, **_kwargs):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(job_processor.job_queue, "put_shutdown_signal", fake_put_shutdown_signal)
+    monkeypatch.setattr(job_processor.job_queue, "join", timeout_join)
+
+    await job_processor.stop_workers()
+
+    assert worker.cancelled()
+    assert job_processor._workers == []
 
 @pytest.mark.asyncio
 async def test_submit_additional_file_accepts_safe_filename(client: httpx.AsyncClient):

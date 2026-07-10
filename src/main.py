@@ -90,15 +90,18 @@ async def lifespan(app: FastAPI):
     finally:
         logging.info("Application shutdown sequence initiated...")
         app.state.job_submission_enabled = False
-        # 워커 종료
         if heavy_startup:
-            await job_processor.stop_workers()
+            try:
+                await job_processor.stop_workers()
+            except Exception:
+                logging.exception("Worker shutdown failed; continuing resource teardown.")
 
-        if heavy_startup:
-            # Playwright 종료
-            await playwright_manager.shutdown()
-            # 가상 디스플레이 종료
-            tool_utils.stop_display()
+            try:
+                await playwright_manager.shutdown()
+            except Exception:
+                logging.exception("Playwright shutdown failed.")
+            finally:
+                tool_utils.stop_display()
 
         cleanup_task = getattr(app.state, "cleanup_task", None)
         if cleanup_task and not cleanup_task.done():
