@@ -49,6 +49,13 @@ async def start() -> None:
         logging.info(f"Browser Server launched. Listening at http://127.0.0.1:{CDP_PORT}")
     except Exception as e:
         logging.critical(f"Failed to launch browser server: {e}")
+        if _playwright:
+            try:
+                await _playwright.stop()
+            except Exception:
+                logging.exception("Failed to stop Playwright after browser startup failure.")
+            _playwright = None
+        _browser = None
         raise RuntimeError("Browser launch failed") from e
 
 async def shutdown() -> None:

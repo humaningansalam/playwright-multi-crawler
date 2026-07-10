@@ -52,59 +52,53 @@ def _get_app_version() -> str:
 async def lifespan(app: FastAPI):
     """애플리케이션 시작/종료 시 실행"""
     logging.info("Application startup sequence initiated...")
-    # Job submission is unavailable until the worker pool is running.
+    heavy_startup = os.getenv("RUN_HEAVY_STARTUP", "true").lower() == "true"
+    monitor = None
+    display_started = False
+    playwright_start_attempted = False
+    workers_started = False
+    cleanup_task = None
     app.state.job_submission_enabled = False
 
-    # 리소스 모니터 시작
-    monitor = ResourceMonitor(metrics_obj=metrics, interval=5)
-    monitor.start()
-    app.state.monitor = monitor
-
-    heavy_startup = os.getenv("RUN_HEAVY_STARTUP", "true").lower() == "true"
-
-    # 작업 폴더 확인/생성
-    tool_utils.ensure_job_folder()
-    # 가상 디스플레이 시작
-    if heavy_startup:
-        if not tool_utils.start_display():
-            raise RuntimeError("Virtual display startup failed; refusing to launch headful browser")
-        # Playwright 시작 및 브라우저/컨텍스트 준비
-        await playwright_manager.start()
-    else:
-        logging.info("Skipping display/Playwright startup (RUN_HEAVY_STARTUP=false)")
-    # 워커 태스크 시작
-    if heavy_startup:
-        job_processor.start_workers()
-        app.state.job_submission_enabled = True
-    else:
-        logging.info("Skipping worker startup (RUN_HEAVY_STARTUP=false)")
-    # 주기적 정리 작업 시작
-    app.state.cleanup_task = asyncio.create_task(
-        tool_utils.periodic_cleanup(),
-        name="PeriodicCleanupTask"
-    )
-
-    logging.info("Application startup sequence completed.")
-
     try:
+        monitor = ResourceMonitor(metrics_obj=metrics, interval=5)
+        monitor.start()
+        app.state.monitor = monitor
+
+        tool_utils.ensure_job_folder()
+        if heavy_startup:
+            if not tool_utils.start_display():
+                raise RuntimeError("Virtual display startup failed; refusing to launch headful browser")
+            display_started = True
+            playwright_start_attempted = True
+            await playwright_manager.start()
+            job_processor.start_workers()
+            workers_started = True
+            app.state.job_submission_enabled = True
+        else:
+            logging.info("Skipping display/Playwright startup (RUN_HEAVY_STARTUP=false)")
+            logging.info("Skipping worker startup (RUN_HEAVY_STARTUP=false)")
+
+        cleanup_task = asyncio.create_task(tool_utils.periodic_cleanup(), name="PeriodicCleanupTask")
+        app.state.cleanup_task = cleanup_task
+        logging.info("Application startup sequence completed.")
         yield
     finally:
         logging.info("Application shutdown sequence initiated...")
         app.state.job_submission_enabled = False
-        if heavy_startup:
+        if workers_started:
             try:
                 await job_processor.stop_workers()
             except Exception:
                 logging.exception("Worker shutdown failed; continuing resource teardown.")
-
+        if playwright_start_attempted:
             try:
                 await playwright_manager.shutdown()
             except Exception:
                 logging.exception("Playwright shutdown failed.")
-            finally:
-                tool_utils.stop_display()
+        if display_started:
+            tool_utils.stop_display()
 
-        cleanup_task = getattr(app.state, "cleanup_task", None)
         if cleanup_task and not cleanup_task.done():
             cleanup_task.cancel()
             logging.info("Cancelled periodic cleanup task.")
@@ -113,7 +107,6 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
 
-        monitor = getattr(app.state, "monitor", None)
         if monitor:
             try:
                 monitor.stop()

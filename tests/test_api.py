@@ -670,6 +670,40 @@ async def test_heavy_lifespan_refuses_headful_browser_when_display_fails(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_heavy_lifespan_unwinds_resources_when_browser_start_fails(monkeypatch):
+    calls = []
+
+    class FakeMonitor:
+        def __init__(self, **_kwargs):
+            pass
+        def start(self):
+            calls.append("monitor_start")
+        def stop(self):
+            calls.append("monitor_stop")
+
+    async def failing_playwright_start():
+        calls.append("playwright_start")
+        raise RuntimeError("browser launch failed")
+
+    async def fake_playwright_shutdown():
+        calls.append("playwright_shutdown")
+
+    monkeypatch.setattr("src.main.ResourceMonitor", FakeMonitor)
+    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
+    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display") or True)
+    monkeypatch.setattr("src.common.tool_utils.stop_display", lambda: calls.append("stop_display"))
+    monkeypatch.setattr("src.core.playwright_manager.start", failing_playwright_start)
+    monkeypatch.setattr("src.core.playwright_manager.shutdown", fake_playwright_shutdown)
+    monkeypatch.setenv("RUN_HEAVY_STARTUP", "true")
+
+    with pytest.raises(RuntimeError, match="browser launch failed"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert calls == ["monitor_start", "ensure_job_folder", "start_display", "playwright_start", "playwright_shutdown", "stop_display", "monitor_stop"]
+
+
+@pytest.mark.asyncio
 async def test_stop_workers_cancels_workers_after_queue_timeout(monkeypatch):
     worker = asyncio.create_task(asyncio.Event().wait())
     job_processor._workers = [worker]
