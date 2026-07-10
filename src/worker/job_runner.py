@@ -32,6 +32,8 @@ def _write_result_atomic(job_path: str, output: dict) -> None:
 async def run_user_script(job_id, script_path, job_path):
     result_data = None
     error_info = None
+    if job_path not in sys.path:
+        sys.path.insert(0, job_path)
     
     async with async_playwright() as p:
         browser = None

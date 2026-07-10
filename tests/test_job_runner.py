@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import sys
 
 import pytest
 
@@ -96,6 +98,31 @@ async def test_job_runner_keeps_shared_browser_open_when_crawl_fails(monkeypatch
     assert browser.context.closed is True
     assert browser.close_called is False
     assert (Path(tmp_path) / job_runner.RESULT_FILENAME).exists()
+
+
+@pytest.mark.asyncio
+async def test_job_runner_imports_helper_from_job_directory(monkeypatch, tmp_path):
+    helper_module = "job_helper_for_import_test"
+    script_path = tmp_path / "script.py"
+    (tmp_path / f"{helper_module}.py").write_text(
+        "def value():\n"
+        "    return 'from helper'\n",
+        encoding="utf-8",
+    )
+    script_path.write_text(
+        f"from {helper_module} import value\n\n"
+        "async def crawl(page, context, job_path):\n"
+        "    return {'value': value()}\n",
+        encoding="utf-8",
+    )
+    browser = _FakeBrowser()
+    monkeypatch.setattr(job_runner, "async_playwright", lambda: _FakePlaywright(browser))
+    sys.modules.pop(helper_module, None)
+
+    await job_runner.run_user_script("job-1", str(script_path), str(tmp_path))
+
+    result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
+    assert result == {"status": "COMPLETED", "result": {"value": "from helper"}, "error": None}
 
 
 @pytest.mark.asyncio
