@@ -37,4 +37,5 @@ class HealthResponse(BaseModel):
      """Health check 응답 모델"""
      status: str = "ok"
      browser_connected: bool
+     workers_ready: bool
      queued_tasks: int

@@ -30,14 +30,48 @@ def _pyproject_version() -> str:
         return tomllib.load(handle)["project"]["version"]
 
 @pytest.mark.asyncio
-async def test_health_check(client: httpx.AsyncClient):
-    """/health 엔드포인트 기본 응답 테스트"""
+async def test_health_check_reports_ready_service(client: httpx.AsyncClient, monkeypatch):
+    monkeypatch.setattr("src.core.playwright_manager.is_browser_connected", lambda: True)
+
     response = await client.get("/health")
+
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
-    assert data["browser_connected"] is False
+    assert data["browser_connected"] is True
+    assert data["workers_ready"] is True
     assert data["queued_tasks"] == 0
+
+
+@pytest.mark.asyncio
+async def test_health_check_reports_unavailable_browser(client: httpx.AsyncClient, monkeypatch):
+    monkeypatch.setattr("src.core.playwright_manager.is_browser_connected", lambda: False)
+
+    response = await client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "browser_connected": False,
+        "workers_ready": True,
+        "queued_tasks": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_health_check_reports_unavailable_workers(client: httpx.AsyncClient, monkeypatch):
+    monkeypatch.setattr("src.core.playwright_manager.is_browser_connected", lambda: True)
+    app.state.job_submission_enabled = False
+
+    response = await client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "browser_connected": True,
+        "workers_ready": False,
+        "queued_tasks": 0,
+    }
 
 
 @pytest.mark.asyncio
