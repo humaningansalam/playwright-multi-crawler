@@ -92,6 +92,7 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
         # 서브프로세스 실행 (비동기)
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            cwd=job_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
