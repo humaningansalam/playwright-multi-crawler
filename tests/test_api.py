@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from src.config import JOB_FOLDER
 from src.api import jobs as jobs_api
-from src.api.jobs import download_file_endpoint
+from src.api.jobs import download_file_endpoint, stream_job_logs_endpoint
 from src.core import state_manager as state
 from src.main import app
 from src.worker import job_processor
@@ -238,6 +238,22 @@ async def test_cancel_rejects_terminal_or_unknown_job(client: httpx.AsyncClient,
     await state.update_job_status("completed-job", "COMPLETED", {"ok": True})
     terminal = await client.post("/api/jobs/completed-job/cancel")
     assert terminal.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_stream_job_logs_replays_completed_job_output(tmp_path):
+    job_id = "stream-logs-test"
+    await state.set_initial_status(job_id, "stream_logs", str(tmp_path))
+    (tmp_path / "stdout.log").write_text("hello stdout\n", encoding="utf-8")
+    (tmp_path / "stderr.log").write_text("hello stderr\n", encoding="utf-8")
+    await state.update_job_status(job_id, "COMPLETED", {"ok": True})
+
+    response = await stream_job_logs_endpoint(job_id)
+    body = "".join([chunk async for chunk in response.body_iterator])
+
+    assert response.media_type == "text/event-stream"
+    assert 'event: stdout\ndata: "hello stdout\\n"\n\n' in body
+    assert 'event: stderr\ndata: "hello stderr\\n"\n\n' in body
 
 
 @pytest.mark.asyncio

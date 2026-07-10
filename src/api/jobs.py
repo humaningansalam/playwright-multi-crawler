@@ -1,3 +1,5 @@
+import asyncio
+import json
 import logging
 import os
 import shutil
@@ -6,7 +8,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Dict, Any, Optional, Union
 
 from fastapi import APIRouter, File, Request, UploadFile, Form, HTTPException, status, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 # core 및 common 모듈 임포트
 from src.core import state_manager as state
@@ -24,6 +26,8 @@ router = APIRouter(
 
 RESERVED_JOB_FILENAMES = {"script.py", "result.json", "result.json.tmp"}
 UPLOAD_CHUNK_BYTES = 1024 * 1024
+LOG_FILENAMES = ("stdout.log", "stderr.log")
+TERMINAL_JOB_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 
 
 def _error_response(description: str) -> Dict[str, Any]:
@@ -284,6 +288,45 @@ async def get_job_results_endpoint(job_id: str):
     else:
         logging.error(f"Job {job_id} has unknown status: {status_val}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Unknown job status: {status_val}")
+
+
+async def _stream_job_logs(job_id: str, job_path: str):
+    offsets = {filename: 0 for filename in LOG_FILENAMES}
+    while True:
+        for filename in LOG_FILENAMES:
+            log_path = os.path.join(job_path, filename)
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
+                    log_file.seek(offsets[filename])
+                    content = log_file.read()
+                    offsets[filename] = log_file.tell()
+            except FileNotFoundError:
+                continue
+
+            if content:
+                event_name = filename.removesuffix(".log")
+                yield f"event: {event_name}\ndata: {json.dumps(content)}\n\n"
+
+        job_status = await state.get_job_status(job_id)
+        if job_status in TERMINAL_JOB_STATUSES:
+            return
+        await asyncio.sleep(0.1)
+
+
+@router.get(
+    "/logs/{job_id}",
+    responses={404: _error_response("Job not found")},
+)
+async def stream_job_logs_endpoint(job_id: str):
+    job_info = await state.get_job_info(job_id)
+    if not job_info or not job_info.get("job_path"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    return StreamingResponse(
+        _stream_job_logs(job_id, job_info["job_path"]),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get(
