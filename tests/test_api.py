@@ -159,6 +159,30 @@ async def test_periodic_cleanup_offloads_file_cleanup(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_periodic_cleanup_removes_state_for_deleted_job_folders(monkeypatch):
+    removed_job_ids = []
+
+    async def fake_to_thread(function):
+        assert function is tool_utils.clean_old_jobs
+        return ["expired-job-1", "expired-job-2"]
+
+    async def fake_remove_job_state(job_id):
+        removed_job_ids.append(job_id)
+
+    async def stop_after_one_cleanup(_seconds):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr("src.common.tool_utils.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr("src.common.tool_utils.state.remove_job_state", fake_remove_job_state)
+    monkeypatch.setattr("src.common.tool_utils.asyncio.sleep", stop_after_one_cleanup)
+
+    with pytest.raises(asyncio.CancelledError):
+        await tool_utils.periodic_cleanup()
+
+    assert removed_job_ids == ["expired-job-1", "expired-job-2"]
+
+
+@pytest.mark.asyncio
 async def test_metrics_endpoint(client: httpx.AsyncClient):
     response = await client.get("/metrics")
 

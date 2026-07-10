@@ -48,14 +48,14 @@ def stop_display():
             logging.error(f"Failed to stop virtual display: {e}")
         _display = None # 종료 후 None으로 설정
 
-def clean_old_jobs():
-    """오래된 작업 폴더 삭제 및 관련 상태 정보 정리 요청"""
+def clean_old_jobs() -> list[str]:
+    """Delete old job folders and return their IDs for event-loop state cleanup."""
     cutoff = datetime.now() - timedelta(days=JOB_RETENTION_DAYS)
     logging.info(f"Running cleanup for jobs older than {cutoff.isoformat()} in {JOB_FOLDER}")
 
     if not os.path.exists(JOB_FOLDER):
         logging.debug(f"Job folder {JOB_FOLDER} does not exist. Skipping cleanup.")
-        return
+        return []
 
     deleted_job_ids = []
     try:
@@ -77,19 +77,7 @@ def clean_old_jobs():
          logging.error(f"Error listing directory {JOB_FOLDER} during cleanup: {e}")
 
 
-    # 상태 딕셔너리에서도 삭제된 job_id 정리 
-    if deleted_job_ids:
-        async def cleanup_state_task():
-            logging.info(f"Requesting state cleanup for {len(deleted_job_ids)} old jobs.")
-            for job_id in deleted_job_ids:
-                await state.remove_job_state(job_id)
-        try:
-            # 현재 실행 중인 이벤트 루프에서 태스크 생성
-            loop = asyncio.get_running_loop()
-            loop.create_task(cleanup_state_task())
-            logging.debug("Scheduled state cleanup task for old jobs.")
-        except RuntimeError:
-            logging.warning("Event loop not running, cannot schedule state cleanup task.")
+    return deleted_job_ids
 
 
 async def periodic_cleanup():
@@ -97,7 +85,9 @@ async def periodic_cleanup():
     logging.info("Periodic cleanup task started.")
     while True:
         try:
-            await asyncio.to_thread(clean_old_jobs)
+            deleted_job_ids = await asyncio.to_thread(clean_old_jobs)
+            for job_id in deleted_job_ids:
+                await state.remove_job_state(job_id)
         except Exception as e:
             logging.error(f"Error during periodic cleanup execution: {e}", exc_info=True)
 
