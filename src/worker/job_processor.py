@@ -4,6 +4,7 @@ import time
 import os
 import sys
 import json
+import signal
 import traceback
 from typing import Dict, List, Any, Optional
 
@@ -45,18 +46,24 @@ async def _read_result_file(job_path: str) -> Optional[Dict[str, Any]]:
 async def _terminate_process(proc: asyncio.subprocess.Process, job_id: str) -> None:
     if proc.returncode is not None:
         return
-    logging.warning(f"Job {job_id} exceeded timeout. Terminating subprocess.")
+    logging.warning(f"Terminating job subprocess group for {job_id}.")
     try:
-        proc.terminate()
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
     except ProcessLookupError:
         return
 
     try:
         await asyncio.wait_for(proc.wait(), timeout=5.0)
     except asyncio.TimeoutError:
-        logging.warning(f"Job {job_id} did not exit after SIGTERM. Killing subprocess.")
+        logging.warning(f"Job {job_id} did not exit after SIGTERM. Killing subprocess group.")
         try:
-            proc.kill()
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
         except ProcessLookupError:
             return
         await proc.wait()
@@ -87,15 +94,18 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     stdout_decoded = ""
     stderr_decoded = ""
     timed_out = False
+    proc: Optional[asyncio.subprocess.Process] = None
 
     try:
         # 서브프로세스 실행 (비동기)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=job_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        subprocess_options = {
+            "cwd": job_path,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+        }
+        if os.name == "posix":
+            subprocess_options["start_new_session"] = True
+        proc = await asyncio.create_subprocess_exec(*cmd, **subprocess_options)
 
         # 프로세스 완료 대기 및 출력 캡처 (타임아웃 적용)
         try:
@@ -145,6 +155,10 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
         else:
             metrics.jobs_failed.inc()
 
+    except asyncio.CancelledError:
+        if proc is not None:
+            await _terminate_process(proc, job_id)
+        raise
     except Exception as e:
         logging.error(f"System error processing job '{jobname}' (ID: {job_id}): {e}")
         logging.error(traceback.format_exc())

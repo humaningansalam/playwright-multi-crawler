@@ -1,5 +1,8 @@
 from pathlib import Path
+import asyncio
 import json
+import os
+import signal
 import sys
 
 import pytest
@@ -209,3 +212,69 @@ async def test_job_processor_runs_subprocess_in_job_directory(monkeypatch, tmp_p
     await job_processor._process_job_internal(str(script_path), "cwd-test", "job-1")
 
     assert subprocess_kwargs["cwd"] == str(tmp_path)
+    if os.name == "posix":
+        assert subprocess_kwargs["start_new_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_job_processor_terminates_process_group(monkeypatch):
+    signals = []
+
+    class _FakeProcess:
+        pid = 4321
+        returncode = None
+
+        async def wait(self):
+            return 0
+
+        def terminate(self):
+            raise AssertionError("POSIX process groups must use killpg")
+
+    process = _FakeProcess()
+    if os.name == "posix":
+        monkeypatch.setattr(job_processor.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+
+    await job_processor._terminate_process(process, "job-1")
+
+    if os.name == "posix":
+        assert signals == [(process.pid, signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
+async def test_job_processor_terminates_process_group_when_cancelled(monkeypatch, tmp_path):
+    script_path = tmp_path / "script.py"
+    script_path.write_text("# test script\n", encoding="utf-8")
+    communicate_started = asyncio.Event()
+    terminated = []
+
+    class _FakeProcess:
+        returncode = None
+
+        async def communicate(self):
+            communicate_started.set()
+            await asyncio.Event().wait()
+
+    process = _FakeProcess()
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    async def fake_terminate(received_process, job_id):
+        terminated.append((received_process, job_id))
+
+    async def ignore_state_update(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
+    monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
+    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_state_update)
+
+    task = asyncio.create_task(job_processor._process_job_internal(str(script_path), "cancel-test", "job-1"))
+    await communicate_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert terminated == [(process, "job-1")]
