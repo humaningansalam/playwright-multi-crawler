@@ -6,6 +6,7 @@ import shutil
 import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Dict, Any, Optional, Union
+from urllib.parse import quote
 
 from fastapi import APIRouter, File, Request, UploadFile, Form, HTTPException, status, Depends
 from fastapi.responses import FileResponse, StreamingResponse
@@ -268,7 +269,7 @@ async def get_job_results_endpoint(job_id: str):
                 # API 경로 접두사를 고려하여 URL 생성
                 base_download_url = f"{router.prefix}/download/{job_id}"
                 files = {
-                    filename: f"{base_download_url}/{filename}"
+                    filename: f"{base_download_url}/{quote(filename, safe='')}"
                     for filename in os.listdir(job_path)
                     if os.path.isfile(os.path.join(job_path, filename))
                 }

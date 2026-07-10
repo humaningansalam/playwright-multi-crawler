@@ -409,6 +409,29 @@ async def test_get_completed_results_lists_downloadable_files(client: httpx.Asyn
 
 
 @pytest.mark.asyncio
+async def test_completed_result_encodes_reserved_filename_download_link(client: httpx.AsyncClient, tmp_path):
+    job_id = "encoded-download-test"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    filename = "report?.txt"
+    (job_dir / filename).write_text("reserved filename", encoding="utf-8")
+
+    await state.set_initial_status(job_id, "encoded_download_test", str(job_dir))
+    await state.update_job_status(job_id, "COMPLETED", result={"ok": True})
+
+    results_response = await client.get(f"/api/jobs/results/{job_id}")
+
+    assert results_response.status_code == 200
+    download_url = results_response.json()["files"][filename]
+    assert download_url == f"/api/jobs/download/{job_id}/report%3F.txt"
+
+    download_response = await client.get(download_url)
+
+    assert download_response.status_code == 200
+    assert download_response.content == b"reserved filename"
+
+
+@pytest.mark.asyncio
 async def test_get_status_not_found(client: httpx.AsyncClient):
     """존재하지 않는 job_id 상태 조회 시 404 반환 테스트"""
     response = await client.get("/api/jobs/status/non-existent-job-id")
