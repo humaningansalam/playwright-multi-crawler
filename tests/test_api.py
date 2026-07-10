@@ -117,6 +117,31 @@ async def test_health_check_reports_unavailable_workers(client: httpx.AsyncClien
 
 
 @pytest.mark.asyncio
+async def test_lifespan_stops_resource_monitor(monkeypatch):
+    calls = []
+
+    class _FakeMonitor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            calls.append("start")
+
+        def stop(self):
+            calls.append("stop")
+
+    monkeypatch.setattr("src.main.ResourceMonitor", _FakeMonitor)
+    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: None)
+    monkeypatch.setattr("src.common.tool_utils.periodic_cleanup", lambda: asyncio.sleep(0))
+    monkeypatch.setenv("RUN_HEAVY_STARTUP", "false")
+
+    async with app.router.lifespan_context(app):
+        pass
+
+    assert calls == ["start", "stop"]
+
+
+@pytest.mark.asyncio
 async def test_metrics_endpoint(client: httpx.AsyncClient):
     response = await client.get("/metrics")
 

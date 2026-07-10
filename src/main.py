@@ -113,6 +113,13 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
 
+        monitor = getattr(app.state, "monitor", None)
+        if monitor:
+            try:
+                monitor.stop()
+            except Exception:
+                logging.exception("Resource monitor shutdown failed.")
+
         logging.info("Application shutdown sequence completed.")
 
 
