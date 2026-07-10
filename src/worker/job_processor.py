@@ -41,6 +41,12 @@ async def _read_result_file(job_path: str) -> Optional[Dict[str, Any]]:
     result_path = os.path.join(job_path, RESULT_FILENAME)
     if not os.path.exists(result_path):
         return None
+    try:
+        with open(result_path, "r", encoding="utf-8") as result_file:
+            return json.load(result_file)
+    except Exception as e:
+        logging.error(f"Failed to read {RESULT_FILENAME} in {job_path}: {e}")
+        return None
 
 
 async def _stream_output_to_log(stream: asyncio.StreamReader, path: str) -> str:
@@ -53,12 +59,6 @@ async def _stream_output_to_log(stream: asyncio.StreamReader, path: str) -> str:
             if len(tail) > LOG_TAIL_BYTES:
                 del tail[:-LOG_TAIL_BYTES]
     return tail.decode("utf-8", errors="replace").strip()
-    try:
-        with open(result_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logging.error(f"Failed to read {RESULT_FILENAME} in {job_path}: {e}")
-        return None
 
 
 async def _terminate_process(proc: asyncio.subprocess.Process, job_id: str) -> None:

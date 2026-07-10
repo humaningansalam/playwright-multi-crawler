@@ -231,6 +231,16 @@ async def test_job_processor_streams_output_to_log_and_bounds_tail(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_job_processor_reads_completed_result_file(tmp_path):
+    expected = {"status": "COMPLETED", "result": {"items": ["one"]}, "error": None}
+    (tmp_path / job_processor.RESULT_FILENAME).write_text(json.dumps(expected), encoding="utf-8")
+
+    result = await job_processor._read_result_file(str(tmp_path))
+
+    assert result == expected
+
+
+@pytest.mark.asyncio
 async def test_job_processor_terminates_process_group(monkeypatch):
     signals = []
 
