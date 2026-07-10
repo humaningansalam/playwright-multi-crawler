@@ -52,6 +52,8 @@ def _get_app_version() -> str:
 async def lifespan(app: FastAPI):
     """애플리케이션 시작/종료 시 실행"""
     logging.info("Application startup sequence initiated...")
+    # Job submission is unavailable until the worker pool is running.
+    app.state.job_submission_enabled = False
 
     # 리소스 모니터 시작
     monitor = ResourceMonitor(metrics_obj=metrics, interval=5)
@@ -72,6 +74,7 @@ async def lifespan(app: FastAPI):
     # 워커 태스크 시작
     if heavy_startup:
         job_processor.start_workers()
+        app.state.job_submission_enabled = True
     else:
         logging.info("Skipping worker startup (RUN_HEAVY_STARTUP=false)")
     # 주기적 정리 작업 시작
@@ -86,6 +89,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         logging.info("Application shutdown sequence initiated...")
+        app.state.job_submission_enabled = False
         # 워커 종료
         if heavy_startup:
             await job_processor.stop_workers()

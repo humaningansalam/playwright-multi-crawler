@@ -19,6 +19,16 @@ os.environ.setdefault("PYTHONPATH", os.path.abspath(os.path.join(os.path.dirname
 from src.config import JOB_FOLDER
 from src.core import state_manager
 
+
+@pytest.fixture(autouse=True)
+def mark_test_app_workers_ready():
+    """API unit tests mock queue behavior and therefore opt into submission."""
+    from src.main import app
+
+    app.state.job_submission_enabled = True
+    yield
+    app.state.job_submission_enabled = False
+
 @pytest.fixture(scope="session")
 def event_loop():
     """

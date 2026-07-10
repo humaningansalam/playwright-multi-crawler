@@ -73,7 +73,7 @@ def test_openapi_job_results_200_documents_response_models():
 def test_openapi_job_routes_document_error_responses():
     openapi = app.openapi()
 
-    assert {"400", "409"} <= set(openapi["paths"]["/api/jobs/submit"]["post"]["responses"])
+    assert {"400", "409", "503"} <= set(openapi["paths"]["/api/jobs/submit"]["post"]["responses"])
     assert "404" in openapi["paths"]["/api/jobs/status/{job_id}"]["get"]["responses"]
     assert "404" in openapi["paths"]["/api/jobs/results/{job_id}"]["get"]["responses"]
     assert {"403", "404"} <= set(openapi["paths"]["/api/jobs/download/{job_id}/{filename}"]["get"]["responses"])
@@ -262,6 +262,27 @@ async def test_lightweight_lifespan_skips_workers(monkeypatch):
         assert calls == ["ensure_job_folder"]
 
     assert calls == ["ensure_job_folder"]
+
+
+@pytest.mark.asyncio
+async def test_submit_is_rejected_when_workers_are_disabled(monkeypatch):
+    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: None)
+    monkeypatch.setattr("src.common.tool_utils.periodic_cleanup", lambda: asyncio.sleep(0))
+    monkeypatch.setenv("RUN_HEAVY_STARTUP", "false")
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as disabled_client:
+            response = await disabled_client.post(
+                "/api/jobs/submit",
+                data={"jobname": "workers-disabled"},
+                files={"script_file": ("crawl.py", DUMMY_SCRIPT_CONTENT, "text/x-python")},
+            )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Job workers are unavailable"}
+    assert not await state.is_job_submitted("workers-disabled")
+    assert not os.path.exists(JOB_FOLDER) or not any(os.scandir(JOB_FOLDER))
 
 
 @pytest.mark.asyncio

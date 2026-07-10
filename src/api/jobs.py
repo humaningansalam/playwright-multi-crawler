@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Dict, Any, Optional, Union
 
-from fastapi import APIRouter, File, UploadFile, Form, HTTPException, status, Depends
+from fastapi import APIRouter, File, Request, UploadFile, Form, HTTPException, status, Depends
 from fastapi.responses import FileResponse
 
 # core 및 common 모듈 임포트
@@ -60,9 +60,11 @@ def _is_valid_additional_filename(filename: str) -> bool:
     responses={
         400: _error_response("Invalid job submission"),
         409: _error_response("Duplicate active job name"),
+        503: _error_response("Job workers are unavailable"),
     },
 )
 async def submit_job_endpoint(
+    request: Request,
     jobname: str = Form(...),
     script_file: UploadFile = File(...),
     additional_files: List[UploadFile] = File(default=[])
@@ -75,6 +77,12 @@ async def submit_job_endpoint(
     """
     if not jobname or not script_file or script_file.filename is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Jobname and script file are required')
+
+    if not getattr(request.app.state, "job_submission_enabled", False):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Job workers are unavailable",
+        )
 
     # 중복 작업 이름 체크 및 등록
     if not await state.add_submitted_job(jobname):
