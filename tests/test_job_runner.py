@@ -101,6 +101,60 @@ async def test_job_runner_keeps_shared_browser_open_when_crawl_fails(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_job_runner_writes_result_when_page_cleanup_fails(monkeypatch, tmp_path):
+    script_path = tmp_path / "script.py"
+    script_path.write_text(
+        "async def crawl(page, context, job_path):\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    browser = _FakeBrowser()
+
+    async def fail_close():
+        raise RuntimeError("page close failed")
+
+    browser.context.page.close = fail_close
+    monkeypatch.setattr(job_runner, "async_playwright", lambda: _FakePlaywright(browser))
+
+    await job_runner.run_user_script("job-1", str(script_path), str(tmp_path))
+
+    result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
+    assert result["status"] == "FAILED"
+    assert result["error"] == {
+        "error": "Browser cleanup failed",
+        "cleanup_errors": [{"resource": "page", "error": "page close failed"}],
+    }
+    assert browser.context.closed is True
+
+
+@pytest.mark.asyncio
+async def test_job_runner_writes_result_when_context_cleanup_fails(monkeypatch, tmp_path):
+    script_path = tmp_path / "script.py"
+    script_path.write_text(
+        "async def crawl(page, context, job_path):\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    browser = _FakeBrowser()
+
+    async def fail_close():
+        raise RuntimeError("context close failed")
+
+    browser.context.close = fail_close
+    monkeypatch.setattr(job_runner, "async_playwright", lambda: _FakePlaywright(browser))
+
+    await job_runner.run_user_script("job-1", str(script_path), str(tmp_path))
+
+    result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
+    assert result["status"] == "FAILED"
+    assert result["error"] == {
+        "error": "Browser cleanup failed",
+        "cleanup_errors": [{"resource": "context", "error": "context close failed"}],
+    }
+    assert browser.context.page.closed is True
+
+
+@pytest.mark.asyncio
 async def test_job_runner_imports_helper_from_job_directory(monkeypatch, tmp_path):
     helper_module = "job_helper_for_import_test"
     script_path = tmp_path / "script.py"

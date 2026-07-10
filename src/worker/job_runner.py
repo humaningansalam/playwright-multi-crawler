@@ -34,54 +34,64 @@ async def run_user_script(job_id, script_path, job_path):
     error_info = None
     if job_path not in sys.path:
         sys.path.insert(0, job_path)
-    
-    async with async_playwright() as p:
-        browser = None
-        context = None
-        page = None
-        try:
-            # 1. 메인 서버가 띄워둔 브라우저에 접속
-            browser = await p.chromium.connect_over_cdp(CDP_URL)
-            
-            # 2. 작업 격리를 위해 독립적인 Context 생성
-            # 필요하다면 여기서 user_data_dir을 지정하거나 쿠키를 로드할 수 있음
-            context = await browser.new_context()
-            page = await context.new_page()
 
-            # 3. 사용자 스크립트 동적 로드
-            spec = importlib.util.spec_from_file_location("user_module", script_path)
-            if spec is None or spec.loader is None:
-                 raise ImportError(f"Could not load script from {script_path}")
-            
-            user_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(user_module)
+    try:
+        async with async_playwright() as p:
+            browser = None
+            context = None
+            page = None
+            try:
+                browser = await p.chromium.connect_over_cdp(CDP_URL)
+                context = await browser.new_context()
+                page = await context.new_page()
 
-            # 4. crawl 함수 실행
-            if hasattr(user_module, 'crawl') and asyncio.iscoroutinefunction(user_module.crawl):
-                result_data = await user_module.crawl(page, context, job_path)
+                spec = importlib.util.spec_from_file_location("user_module", script_path)
+                if spec is None or spec.loader is None:
+                    raise ImportError(f"Could not load script from {script_path}")
 
-                # crawl이 {"error": ...}를 반환하면 실패로 간주
-                if isinstance(result_data, dict) and result_data.get("error"):
-                    error_info = result_data
-            else:
-                raise AttributeError("The script must contain an async function named 'crawl'.")
+                user_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(user_module)
 
-        except Exception as e:
+                if hasattr(user_module, "crawl") and asyncio.iscoroutinefunction(user_module.crawl):
+                    result_data = await user_module.crawl(page, context, job_path)
+                    if isinstance(result_data, dict) and result_data.get("error"):
+                        error_info = result_data
+                else:
+                    raise AttributeError("The script must contain an async function named 'crawl'.")
+
+            except Exception as e:
+                error_info = {
+                    "error": str(e),
+                    "traceback": traceback.format_exc()
+                }
+            finally:
+                # Close both resources even if one close operation fails.
+                cleanup_errors = []
+                for name, resource in (("page", page), ("context", context)):
+                    if resource is None:
+                        continue
+                    try:
+                        await resource.close()
+                    except Exception as cleanup_error:
+                        cleanup_errors.append({"resource": name, "error": str(cleanup_error)})
+
+                if cleanup_errors:
+                    if error_info is None:
+                        error_info = {"error": "Browser cleanup failed"}
+                    error_info["cleanup_errors"] = cleanup_errors
+    except Exception as e:
+        if error_info is None:
             error_info = {
                 "error": str(e),
                 "traceback": traceback.format_exc()
             }
-        finally:
-            # 5. 리소스 정리 (브라우저는 끄지 않음)
-            if page: await page.close()
-            if context: await context.close()
-
-    output = {
-        "status": "FAILED" if error_info else "COMPLETED",
-        "result": result_data,
-        "error": error_info
-    }
-    _write_result_atomic(job_path, output)
+    finally:
+        output = {
+            "status": "FAILED" if error_info else "COMPLETED",
+            "result": result_data,
+            "error": error_info
+        }
+        _write_result_atomic(job_path, output)
 
 if __name__ == "__main__":
     # 인자: [1]=job_id, [2]=script_path, [3]=job_path
