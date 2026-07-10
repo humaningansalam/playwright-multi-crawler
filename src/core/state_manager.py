@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime
 import logging
 from typing import Any, Dict, Optional, Set
+from src.models.job import JobStatus
 
 # --- 상태 변수 및 락 ---
 # 작업 상태 및 결과 저장 
@@ -32,7 +33,7 @@ async def set_initial_status(job_id: str, job_name: str, job_path: str):
         if job_id in _job_status_and_results:
             logging.warning(f"Job ID {job_id} already exists in status dict during initialization.")
         _job_status_and_results[job_id] = {
-            'status': 'PENDING',
+            'status': JobStatus.PENDING,
             'result': None,
             'logs': None,
             'job_path': job_path,
@@ -44,7 +45,7 @@ async def set_initial_status(job_id: str, job_name: str, job_path: str):
 
 async def update_job_status(
     job_id: str,
-    status: str,
+    status: JobStatus,
     result: Any = None,
     duration: Optional[float] = None,
     logs: Optional[Dict[str, str]] = None,

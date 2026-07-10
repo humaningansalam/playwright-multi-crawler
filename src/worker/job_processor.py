@@ -12,6 +12,7 @@ from src.core import state_manager as state
 from src.core import job_queue
 from src.config import MAX_CONCURRENT_TASKS, PROJECT_ROOT, JOB_TIMEOUT_SECONDS
 from src.common.metrics import metrics
+from src.models.job import JobStatus
 
 # 워커 스크립트의 절대 경로
 JOB_RUNNER_PATH = os.path.join(PROJECT_ROOT, "src", "worker", "job_runner.py")
@@ -93,7 +94,7 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     start_time = time.time()
     logging.info(f"Starting job '{jobname}' (ID: {job_id}) via subprocess")
     
-    await state.update_job_status(job_id, 'RUNNING')
+    await state.update_job_status(job_id, JobStatus.RUNNING)
     
     job_path = os.path.dirname(script_path)
     
@@ -106,7 +107,7 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
         job_path
     ]
 
-    final_status = 'FAILED'
+    final_status = JobStatus.FAILED
     result_data = None
     stdout_decoded = ""
     stderr_decoded = ""
@@ -158,7 +159,7 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
 
         output_json = await _read_result_file(job_path)
         if timed_out:
-            final_status = "FAILED"
+            final_status = JobStatus.FAILED
             result_data = _build_fallback_result(
                 stdout_decoded,
                 stderr_decoded,
@@ -175,14 +176,14 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
                 "Worker output missing or invalid"
             )
         else:
-            final_status = output_json.get("status", "FAILED")
+            final_status = JobStatus(output_json.get("status", JobStatus.FAILED))
             result_data = output_json.get("result")
             error_info = output_json.get("error")
 
-            if final_status == "FAILED":
+            if final_status == JobStatus.FAILED:
                 result_data = error_info
 
-        if final_status == 'COMPLETED':
+        if final_status == JobStatus.COMPLETED:
             metrics.jobs_completed.inc()
         else:
             metrics.jobs_failed.inc()
@@ -190,7 +191,7 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     except asyncio.CancelledError:
         if proc is not None:
             await _terminate_process(proc, job_id)
-        final_status = "CANCELLED"
+        final_status = JobStatus.CANCELLED
         result_data = {"error": "cancelled"}
         raise
     except Exception as e:
@@ -232,7 +233,7 @@ async def _dispatch_job(job: Dict[str, Any]):
         logging.info(f"Job '{jobname}' (ID: {job_id}) was cancelled.")
     except Exception as e:
         logging.error(f"Critical dispatch error for job '{jobname}': {e}")
-        await state.update_job_status(job_id, 'FAILED', {'error': str(e)})
+        await state.update_job_status(job_id, JobStatus.FAILED, {'error': str(e)})
         await state.remove_submitted_job(jobname)
     finally:
         _running_job_tasks.pop(job_id, None)

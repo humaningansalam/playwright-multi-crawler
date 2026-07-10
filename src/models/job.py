@@ -1,16 +1,27 @@
+from enum import Enum
+
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
+
+class JobStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    INTERRUPTED = "INTERRUPTED"
+
 
 class JobSubmitResponse(BaseModel):
     """작업 제출 성공 시 응답 모델"""
     job_id: str
-    status: str = "PENDING"
+    status: JobStatus = JobStatus.PENDING
     message: str = "Job submitted successfully."
 
 class JobStatusResponse(BaseModel):
     """작업 상태 조회 응답 모델"""
     job_id: str
-    status: str # PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
+    status: JobStatus
 
 class FileInfo(BaseModel):
     """결과 파일 정보 모델"""
@@ -20,7 +31,7 @@ class FileInfo(BaseModel):
 class JobResultResponse(BaseModel):
     """작업 결과 조회 응답 모델"""
     job_id: str
-    status: str # COMPLETED, FAILED, CANCELLED
+    status: JobStatus
     result: Optional[Any] = None # 크롤링 결과 또는 에러 정보
     logs: Optional[Dict[str, str]] = None
     files: Optional[Dict[str, str]] = None # 파일 이름: 다운로드 URL 맵
@@ -31,7 +42,7 @@ class JobResultResponse(BaseModel):
 class JobProcessingResponse(BaseModel):
      """처리 중인 작업 결과 조회 시 응답 모델"""
      job_id: str
-     status: str # PENDING, RUNNING
+     status: JobStatus
      message: str = "Job is still processing."
 
 class HealthResponse(BaseModel):
