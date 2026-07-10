@@ -34,6 +34,7 @@ async def set_initial_status(job_id: str, job_name: str, job_path: str):
         _job_status_and_results[job_id] = {
             'status': 'PENDING',
             'result': None,
+            'logs': None,
             'job_path': job_path,
             'jobname': job_name,
             'submitted_at': datetime.now().isoformat(),
@@ -41,7 +42,13 @@ async def set_initial_status(job_id: str, job_name: str, job_path: str):
         }
     logging.debug(f"Initial status set for job {job_id}: PENDING")
 
-async def update_job_status(job_id: str, status: str, result: Any = None, duration: Optional[float] = None):
+async def update_job_status(
+    job_id: str,
+    status: str,
+    result: Any = None,
+    duration: Optional[float] = None,
+    logs: Optional[Dict[str, str]] = None,
+):
     """작업 상태 및 결과 업데이트"""
     async with _job_status_lock:
         if job_id in _job_status_and_results:
@@ -50,6 +57,8 @@ async def update_job_status(job_id: str, status: str, result: Any = None, durati
                 _job_status_and_results[job_id]['result'] = result
             if duration is not None:
                 _job_status_and_results[job_id]['duration'] = duration
+            if logs is not None:
+                _job_status_and_results[job_id]['logs'] = logs
             logging.debug(f"Status updated for job {job_id}: {status}")
         else:
             logging.warning(f"Attempted to update status for non-existent job ID: {job_id}")

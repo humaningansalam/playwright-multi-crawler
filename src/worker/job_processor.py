@@ -16,6 +16,10 @@ from src.common.metrics import metrics
 # 워커 스크립트의 절대 경로
 JOB_RUNNER_PATH = os.path.join(PROJECT_ROOT, "src", "worker", "job_runner.py")
 RESULT_FILENAME = "result.json"
+STDOUT_LOG_FILENAME = "stdout.log"
+STDERR_LOG_FILENAME = "stderr.log"
+LOG_READ_CHUNK_BYTES = 64 * 1024
+LOG_TAIL_BYTES = 64 * 1024
 
 _workers: List[asyncio.Task] = []
 _running_job_tasks: Dict[str, asyncio.Task] = {}
@@ -36,6 +40,18 @@ async def _read_result_file(job_path: str) -> Optional[Dict[str, Any]]:
     result_path = os.path.join(job_path, RESULT_FILENAME)
     if not os.path.exists(result_path):
         return None
+
+
+async def _stream_output_to_log(stream: asyncio.StreamReader, path: str) -> str:
+    tail = bytearray()
+    with open(path, "wb") as log_file:
+        while chunk := await stream.read(LOG_READ_CHUNK_BYTES):
+            log_file.write(chunk)
+            log_file.flush()
+            tail.extend(chunk)
+            if len(tail) > LOG_TAIL_BYTES:
+                del tail[:-LOG_TAIL_BYTES]
+    return tail.decode("utf-8", errors="replace").strip()
     try:
         with open(result_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -94,6 +110,7 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     result_data = None
     stdout_decoded = ""
     stderr_decoded = ""
+    logs: Optional[Dict[str, str]] = None
     timed_out = False
     proc: Optional[asyncio.subprocess.Process] = None
 
@@ -108,19 +125,33 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
             subprocess_options["start_new_session"] = True
         proc = await asyncio.create_subprocess_exec(*cmd, **subprocess_options)
 
-        # 프로세스 완료 대기 및 출력 캡처 (타임아웃 적용)
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=JOB_TIMEOUT_SECONDS
+        stdout_stream = getattr(proc, "stdout", None)
+        stderr_stream = getattr(proc, "stderr", None)
+        if stdout_stream is not None and stderr_stream is not None:
+            stdout_task = asyncio.create_task(
+                _stream_output_to_log(stdout_stream, os.path.join(job_path, STDOUT_LOG_FILENAME))
             )
-        except asyncio.TimeoutError:
-            timed_out = True
-            await _terminate_process(proc, job_id)
-            stdout, stderr = await proc.communicate()
+            stderr_task = asyncio.create_task(
+                _stream_output_to_log(stderr_stream, os.path.join(job_path, STDERR_LOG_FILENAME))
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=JOB_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                timed_out = True
+                await _terminate_process(proc, job_id)
+            stdout_decoded, stderr_decoded = await asyncio.gather(stdout_task, stderr_task)
+        else:
+            # Compatibility path for test doubles that do not expose stream readers.
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=JOB_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                timed_out = True
+                await _terminate_process(proc, job_id)
+                stdout, stderr = await proc.communicate()
+            stdout_decoded = stdout.decode().strip()
+            stderr_decoded = stderr.decode().strip()
 
-        stdout_decoded = stdout.decode().strip()
-        stderr_decoded = stderr.decode().strip()
+        logs = {"stdout": stdout_decoded, "stderr": stderr_decoded}
 
         if stderr_decoded:
             logging.warning(f"Job {job_id} stderr: {stderr_decoded}")
@@ -179,7 +210,7 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
         duration = end_time - start_time
         logging.info(f"Job '{jobname}' (ID: {job_id}) finished with status {final_status} in {duration:.2f}s")
 
-        await state.update_job_status(job_id, final_status, result_data, duration)
+        await state.update_job_status(job_id, final_status, result_data, duration, logs)
         await state.remove_submitted_job(jobname)
 
 async def _dispatch_job(job: Dict[str, Any]):

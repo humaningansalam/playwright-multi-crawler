@@ -22,6 +22,7 @@ class JobResultResponse(BaseModel):
     job_id: str
     status: str # COMPLETED, FAILED, CANCELLED
     result: Optional[Any] = None # 크롤링 결과 또는 에러 정보
+    logs: Optional[Dict[str, str]] = None
     files: Optional[Dict[str, str]] = None # 파일 이름: 다운로드 URL 맵
     jobname: Optional[str] = None
     submitted_at: Optional[str] = None

@@ -217,6 +217,20 @@ async def test_job_processor_runs_subprocess_in_job_directory(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_job_processor_streams_output_to_log_and_bounds_tail(tmp_path):
+    stream = asyncio.StreamReader()
+    stream.feed_data(b"prefix-" + b"x" * (job_processor.LOG_TAIL_BYTES + 10))
+    stream.feed_eof()
+    log_path = tmp_path / job_processor.STDOUT_LOG_FILENAME
+
+    tail = await job_processor._stream_output_to_log(stream, str(log_path))
+
+    assert log_path.read_bytes().startswith(b"prefix-")
+    assert log_path.stat().st_size == len(b"prefix-") + job_processor.LOG_TAIL_BYTES + 10
+    assert len(tail.encode("utf-8")) == job_processor.LOG_TAIL_BYTES
+
+
+@pytest.mark.asyncio
 async def test_job_processor_terminates_process_group(monkeypatch):
     signals = []
 

@@ -275,7 +275,13 @@ async def test_get_completed_results_lists_downloadable_files(client: httpx.Asyn
     result_file.write_text("crawl output", encoding="utf-8")
 
     await state.set_initial_status(job_id, "completed_download_test", str(job_dir))
-    await state.update_job_status(job_id, "COMPLETED", result={"ok": True}, duration=1.25)
+    await state.update_job_status(
+        job_id,
+        "COMPLETED",
+        result={"ok": True},
+        duration=1.25,
+        logs={"stdout": "tail output", "stderr": ""},
+    )
 
     results_response = await client.get(f"/api/jobs/results/{job_id}")
 
@@ -283,6 +289,7 @@ async def test_get_completed_results_lists_downloadable_files(client: httpx.Asyn
     result_data = results_response.json()
     assert result_data["status"] == "COMPLETED"
     assert result_data["result"] == {"ok": True}
+    assert result_data["logs"] == {"stdout": "tail output", "stderr": ""}
     assert result_data["files"] == {
         "output.txt": f"/api/jobs/download/{job_id}/output.txt"
     }

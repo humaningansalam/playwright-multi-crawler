@@ -275,6 +275,7 @@ async def get_job_results_endpoint(job_id: str):
             job_id=job_id,
             status=status_val,
             result=result_val,
+            logs=job_info.get('logs'),
             files=files,
             jobname=job_info.get('jobname'),
             submitted_at=job_info.get('submitted_at'),
