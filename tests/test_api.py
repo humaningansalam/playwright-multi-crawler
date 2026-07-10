@@ -16,6 +16,12 @@ from src.main import app
 from src.worker import job_processor
 from src.core import playwright_manager
 from src.common import tool_utils
+from src.models.job import JobStatus
+
+
+def test_job_api_status_sets_use_shared_enum():
+    assert jobs_api.ACTIVE_JOB_STATUSES == frozenset({JobStatus.PENDING, JobStatus.RUNNING})
+    assert jobs_api.TERMINAL_JOB_STATUSES == frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
 
 # 테스트용 간단한 스크립트 파일 내용
 DUMMY_SCRIPT_CONTENT = """

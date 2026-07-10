@@ -17,7 +17,7 @@ from src.worker import job_processor
 from src.config import JOB_FOLDER
 from src.common.metrics import metrics
 # models 임포트 
-from src.models.job import JobSubmitResponse, JobStatusResponse, JobResultResponse, JobProcessingResponse
+from src.models.job import JobProcessingResponse, JobResultResponse, JobStatus, JobStatusResponse, JobSubmitResponse
 
 router = APIRouter(
     prefix="/api/jobs", # API 경로 접두사 설정
@@ -27,7 +27,8 @@ router = APIRouter(
 RESERVED_JOB_FILENAMES = {"script.py", "result.json", "result.json.tmp"}
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 LOG_FILENAMES = ("stdout.log", "stderr.log")
-TERMINAL_JOB_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+ACTIVE_JOB_STATUSES = frozenset({JobStatus.PENDING, JobStatus.RUNNING})
+TERMINAL_JOB_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
 
 
 def _error_response(description: str) -> Dict[str, Any]:
@@ -204,20 +205,20 @@ async def cancel_job_endpoint(job_id: str):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     current_status = job_info["status"]
-    if current_status not in {"PENDING", "RUNNING"}:
+    if current_status not in ACTIVE_JOB_STATUSES:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is already terminal")
 
-    if current_status == "RUNNING":
+    if current_status == JobStatus.RUNNING:
         if not job_processor.cancel_running_job(job_id):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is already terminal")
     else:
         job_queue.cancel_job(job_id)
 
-    await state.update_job_status(job_id, "CANCELLED", {"error": "cancelled"})
-    if current_status == "PENDING":
+    await state.update_job_status(job_id, JobStatus.CANCELLED, {"error": "cancelled"})
+    if current_status == JobStatus.PENDING:
         await state.remove_submitted_job(job_info["jobname"])
 
-    return JobStatusResponse(job_id=job_id, status="CANCELLED")
+    return JobStatusResponse(job_id=job_id, status=JobStatus.CANCELLED)
 
 @router.get(
     "/status/{job_id}",
@@ -252,10 +253,10 @@ async def get_job_results_endpoint(job_id: str):
 
     status_val = job_info['status']
 
-    if status_val in ['PENDING', 'RUNNING']:
+    if status_val in ACTIVE_JOB_STATUSES:
         # 처리 중인 경우 
         return JobProcessingResponse(job_id=job_id, status=status_val)
-    elif status_val in ['COMPLETED', 'FAILED', 'CANCELLED']:
+    elif status_val in TERMINAL_JOB_STATUSES:
         # 완료 또는 실패한 경우
         result_val = job_info.get('result')
         job_path = job_info.get('job_path')
