@@ -2,7 +2,8 @@ name: Dev Docker Image CICD
 
 on:
   push:
-    branches: [ "dev" ]
+    branches: [ "dev", "main" ]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -33,7 +34,7 @@ jobs:
         run: |
           # 필요한 환경 변수 설정 (테스트 환경용 .env 파일 사용 또는 직접 설정)
           # export SOME_TEST_VARIABLE=test_value
-          uv run pytest -s
+          uv run pytest -q
 
       - name: action-slack
         uses: 8398a7/action-slack@v3
