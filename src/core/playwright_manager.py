@@ -9,6 +9,15 @@ from src.config import CDP_PORT
 
 _playwright: Optional[Playwright] = None
 _browser: Optional[Browser] = None
+_shutting_down = False
+_exit_process = os._exit
+
+
+def _on_browser_disconnected() -> None:
+    if _shutting_down:
+        return
+    logging.critical("Shared Chromium disconnected unexpectedly; exiting for service recovery.")
+    _exit_process(1)
 
 async def start() -> None:
     """
@@ -16,11 +25,12 @@ async def start() -> None:
     headless=False로 설정하여 화면을 띄우고,
     --remote-debugging-port 옵션으로 외부 프로세스 접속을 허용합니다.
     """
-    global _playwright, _browser
+    global _playwright, _browser, _shutting_down
     if _playwright:
         logging.warning("Playwright already started.")
         return
 
+    _shutting_down = False
     _playwright = await async_playwright().start()
     logging.info(f"Launching Playwright Browser Server on port {CDP_PORT}...")
     
@@ -35,6 +45,7 @@ async def start() -> None:
                 '--disable-dev-shm-usage'
             ]
         )
+        _browser.on("disconnected", _on_browser_disconnected)
         logging.info(f"Browser Server launched. Listening at http://127.0.0.1:{CDP_PORT}")
     except Exception as e:
         logging.critical(f"Failed to launch browser server: {e}")
@@ -42,7 +53,8 @@ async def start() -> None:
 
 async def shutdown() -> None:
     """Playwright 관련 자원 정리"""
-    global _playwright, _browser
+    global _playwright, _browser, _shutting_down
+    _shutting_down = True
     
     if _browser:
         try:

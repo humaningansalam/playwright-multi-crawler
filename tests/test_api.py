@@ -14,6 +14,7 @@ from src.api.jobs import download_file_endpoint, stream_job_logs_endpoint
 from src.core import state_manager as state
 from src.main import app
 from src.worker import job_processor
+from src.core import playwright_manager
 
 # 테스트용 간단한 스크립트 파일 내용
 DUMMY_SCRIPT_CONTENT = """
@@ -49,6 +50,26 @@ async def test_upload_save_reads_bounded_chunks(tmp_path):
 
     assert upload.read_sizes == [jobs_api.UPLOAD_CHUNK_BYTES] * 3
     assert destination.read_bytes() == b"firstsecond"
+
+
+def test_browser_disconnect_requests_service_restart(monkeypatch):
+    exit_codes = []
+    monkeypatch.setattr(playwright_manager, "_exit_process", lambda code: exit_codes.append(code))
+    monkeypatch.setattr(playwright_manager, "_shutting_down", False)
+
+    playwright_manager._on_browser_disconnected()
+
+    assert exit_codes == [1]
+
+
+def test_browser_disconnect_during_shutdown_does_not_exit(monkeypatch):
+    exit_codes = []
+    monkeypatch.setattr(playwright_manager, "_exit_process", lambda code: exit_codes.append(code))
+    monkeypatch.setattr(playwright_manager, "_shutting_down", True)
+
+    playwright_manager._on_browser_disconnected()
+
+    assert exit_codes == []
 
 @pytest.mark.asyncio
 async def test_health_check_reports_ready_service(client: httpx.AsyncClient, monkeypatch):
