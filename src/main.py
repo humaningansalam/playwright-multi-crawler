@@ -66,7 +66,8 @@ async def lifespan(app: FastAPI):
     tool_utils.ensure_job_folder()
     # 가상 디스플레이 시작
     if heavy_startup:
-        tool_utils.start_display()
+        if not tool_utils.start_display():
+            raise RuntimeError("Virtual display startup failed; refusing to launch headful browser")
         # Playwright 시작 및 브라우저/컨텍스트 준비
         await playwright_manager.start()
     else:

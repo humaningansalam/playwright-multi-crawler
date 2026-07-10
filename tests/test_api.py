@@ -270,7 +270,7 @@ async def test_lightweight_lifespan_skips_workers(monkeypatch):
     calls = []
 
     monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
-    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display"))
+    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display") or True)
     monkeypatch.setattr("src.common.tool_utils.stop_display", lambda: calls.append("stop_display"))
     async def fake_playwright_start():
         calls.append("playwright_start")
@@ -323,7 +323,7 @@ async def test_heavy_lifespan_starts_workers(monkeypatch):
     calls = []
 
     monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
-    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display"))
+    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display") or True)
     monkeypatch.setattr("src.common.tool_utils.stop_display", lambda: calls.append("stop_display"))
     async def fake_playwright_start():
         calls.append("playwright_start")
@@ -355,7 +355,7 @@ async def test_lifespan_completes_teardown_when_worker_shutdown_fails(monkeypatc
     calls = []
 
     monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
-    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display"))
+    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display") or True)
     monkeypatch.setattr("src.common.tool_utils.stop_display", lambda: calls.append("stop_display"))
     monkeypatch.setattr("src.worker.job_processor.start_workers", lambda: calls.append("start_workers"))
     monkeypatch.setattr("src.common.tool_utils.periodic_cleanup", lambda: asyncio.sleep(0))
@@ -379,6 +379,27 @@ async def test_lifespan_completes_teardown_when_worker_shutdown_fails(monkeypatc
         pass
 
     assert calls == ["ensure_job_folder", "start_display", "playwright_start", "start_workers", "stop_workers", "playwright_shutdown", "stop_display"]
+
+
+@pytest.mark.asyncio
+async def test_heavy_lifespan_refuses_headful_browser_when_display_fails(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
+    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display") or False)
+    monkeypatch.setattr("src.worker.job_processor.start_workers", lambda: calls.append("start_workers"))
+    monkeypatch.setenv("RUN_HEAVY_STARTUP", "true")
+
+    async def fake_playwright_start():
+        calls.append("playwright_start")
+
+    monkeypatch.setattr("src.core.playwright_manager.start", fake_playwright_start)
+
+    with pytest.raises(RuntimeError, match="Virtual display startup failed"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert calls == ["ensure_job_folder", "start_display"]
 
 
 @pytest.mark.asyncio
