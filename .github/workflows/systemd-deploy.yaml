@@ -78,3 +78,25 @@ jobs:
             sudo systemctl daemon-reload
             sudo systemctl reenable playwright-multi-crawler
             sudo systemctl restart playwright-multi-crawler
+
+            if ! sudo systemctl is-active --quiet playwright-multi-crawler; then
+              echo "Service did not become active after restart."
+              sudo systemctl status playwright-multi-crawler --no-pager || true
+              exit 1
+            fi
+
+            readiness_url="http://127.0.0.1:${{ vars.SERVER_PORT }}/health"
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent --show-error --max-time 2 "$readiness_url"; then
+                echo "Service readiness check passed on attempt $attempt."
+                break
+              fi
+
+              if [ "$attempt" -eq 30 ]; then
+                echo "Service did not become ready within 30 seconds."
+                sudo systemctl status playwright-multi-crawler --no-pager || true
+                exit 1
+              fi
+
+              sleep 1
+            done
