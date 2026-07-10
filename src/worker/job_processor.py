@@ -18,6 +18,7 @@ JOB_RUNNER_PATH = os.path.join(PROJECT_ROOT, "src", "worker", "job_runner.py")
 RESULT_FILENAME = "result.json"
 
 _workers: List[asyncio.Task] = []
+_running_job_tasks: Dict[str, asyncio.Task] = {}
 
 
 def _build_fallback_result(stdout: str, stderr: str, error: str, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
@@ -158,6 +159,8 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     except asyncio.CancelledError:
         if proc is not None:
             await _terminate_process(proc, job_id)
+        final_status = "CANCELLED"
+        result_data = {"error": "cancelled"}
         raise
     except Exception as e:
         logging.error(f"System error processing job '{jobname}' (ID: {job_id}): {e}")
@@ -187,12 +190,29 @@ async def _dispatch_job(job: Dict[str, Any]):
 
     # 기존의 context.new_page() 로직 제거됨.
     # Worker Process가 알아서 CDP로 접속하여 처리함.
+    process_task = asyncio.create_task(
+        _process_job_internal(script_path, jobname, job_id),
+        name=f"JobProcess-{job_id}",
+    )
+    _running_job_tasks[job_id] = process_task
     try:
-        await _process_job_internal(script_path, jobname, job_id)
+        await process_task
+    except asyncio.CancelledError:
+        logging.info(f"Job '{jobname}' (ID: {job_id}) was cancelled.")
     except Exception as e:
         logging.error(f"Critical dispatch error for job '{jobname}': {e}")
         await state.update_job_status(job_id, 'FAILED', {'error': str(e)})
         await state.remove_submitted_job(jobname)
+    finally:
+        _running_job_tasks.pop(job_id, None)
+
+
+def cancel_running_job(job_id: str) -> bool:
+    task = _running_job_tasks.get(job_id)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
 
 async def _worker():
     """큐에서 작업을 가져와 처리"""
@@ -202,6 +222,10 @@ async def _worker():
         if job is None:
             job_queue.task_done()
             break
+        if job_queue.consume_cancellation(job["job_id"]):
+            await state.remove_submitted_job(job["jobname"])
+            job_queue.task_done()
+            continue
         try:
             await _dispatch_job(job)
         except Exception as e:

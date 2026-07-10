@@ -3,11 +3,24 @@ import logging
 from typing import Any, Dict, Optional
 
 _queue = asyncio.Queue()
+_cancelled_job_ids = set()
 
 async def add_job(job_data: Dict[str, Any]):
     """작업 큐에 작업 추가"""
     await _queue.put(job_data)
     logging.debug(f"Job {job_data.get('job_id', '')} added to queue.")
+
+
+def cancel_job(job_id: str) -> None:
+    """Mark a queued job so a worker skips it when it reaches the queue head."""
+    _cancelled_job_ids.add(job_id)
+
+
+def consume_cancellation(job_id: str) -> bool:
+    if job_id not in _cancelled_job_ids:
+        return False
+    _cancelled_job_ids.remove(job_id)
+    return True
 
 async def get_job() -> Optional[Dict[str, Any]]:
     """큐에서 작업 가져오기 """

@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 # core 및 common 모듈 임포트
 from src.core import state_manager as state
 from src.core import job_queue
+from src.worker import job_processor
 from src.config import JOB_FOLDER
 from src.common.metrics import metrics
 # models 임포트 
@@ -181,6 +182,36 @@ async def submit_job_endpoint(
     logging.info(f"Job '{jobname}' (ID: {job_id}) successfully queued.")
     return JobSubmitResponse(job_id=job_id)
 
+
+@router.post(
+    "/{job_id}/cancel",
+    response_model=JobStatusResponse,
+    responses={
+        404: _error_response("Job not found"),
+        409: _error_response("Job is already terminal"),
+    },
+)
+async def cancel_job_endpoint(job_id: str):
+    job_info = await state.get_job_info(job_id)
+    if not job_info:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    current_status = job_info["status"]
+    if current_status not in {"PENDING", "RUNNING"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is already terminal")
+
+    if current_status == "RUNNING":
+        if not job_processor.cancel_running_job(job_id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is already terminal")
+    else:
+        job_queue.cancel_job(job_id)
+
+    await state.update_job_status(job_id, "CANCELLED", {"error": "cancelled"})
+    if current_status == "PENDING":
+        await state.remove_submitted_job(job_info["jobname"])
+
+    return JobStatusResponse(job_id=job_id, status="CANCELLED")
+
 @router.get(
     "/status/{job_id}",
     response_model=JobStatusResponse,
@@ -217,7 +248,7 @@ async def get_job_results_endpoint(job_id: str):
     if status_val in ['PENDING', 'RUNNING']:
         # 처리 중인 경우 
         return JobProcessingResponse(job_id=job_id, status=status_val)
-    elif status_val in ['COMPLETED', 'FAILED']:
+    elif status_val in ['COMPLETED', 'FAILED', 'CANCELLED']:
         # 완료 또는 실패한 경우
         result_val = job_info.get('result')
         job_path = job_info.get('job_path')

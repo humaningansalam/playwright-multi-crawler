@@ -10,7 +10,7 @@ class JobSubmitResponse(BaseModel):
 class JobStatusResponse(BaseModel):
     """작업 상태 조회 응답 모델"""
     job_id: str
-    status: str # PENDING, RUNNING, COMPLETED, FAILED
+    status: str # PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
 
 class FileInfo(BaseModel):
     """결과 파일 정보 모델"""
@@ -20,7 +20,7 @@ class FileInfo(BaseModel):
 class JobResultResponse(BaseModel):
     """작업 결과 조회 응답 모델"""
     job_id: str
-    status: str # COMPLETED, FAILED
+    status: str # COMPLETED, FAILED, CANCELLED
     result: Optional[Any] = None # 크롤링 결과 또는 에러 정보
     files: Optional[Dict[str, str]] = None # 파일 이름: 다운로드 URL 맵
     jobname: Optional[str] = None

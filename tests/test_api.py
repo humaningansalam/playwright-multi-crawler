@@ -112,6 +112,7 @@ def test_openapi_job_routes_document_error_responses():
     assert "404" in openapi["paths"]["/api/jobs/status/{job_id}"]["get"]["responses"]
     assert "404" in openapi["paths"]["/api/jobs/results/{job_id}"]["get"]["responses"]
     assert {"403", "404"} <= set(openapi["paths"]["/api/jobs/download/{job_id}/{filename}"]["get"]["responses"])
+    assert {"404", "409"} <= set(openapi["paths"]["/api/jobs/{job_id}/cancel"]["post"]["responses"])
 
     detail_schema = openapi["paths"]["/api/jobs/status/{job_id}"]["get"]["responses"]["404"]["content"]["application/json"]["schema"]
     assert detail_schema["required"] == ["detail"]
@@ -170,6 +171,78 @@ async def test_get_results_for_pending_job(client: httpx.AsyncClient):
     assert result_data["job_id"] == job_id
     assert result_data["status"] in ["PENDING", "RUNNING"] # PENDING 또는 RUNNING 상태 기대
     assert "message" in result_data
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_job_marks_it_cancelled_and_removes_submission(client: httpx.AsyncClient, tmp_path):
+    job_id = "cancel-pending-test"
+    job_name = "cancel_pending_test"
+    await state.set_initial_status(job_id, job_name, str(tmp_path))
+    await state.add_submitted_job(job_name)
+
+    response = await client.post(f"/api/jobs/{job_id}/cancel")
+
+    assert response.status_code == 200
+    assert response.json() == {"job_id": job_id, "status": "CANCELLED"}
+    assert await state.get_job_status(job_id) == "CANCELLED"
+    assert not await state.is_job_submitted(job_name)
+    assert job_processor.job_queue.consume_cancellation(job_id)
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_job_cancels_only_the_job_task(client: httpx.AsyncClient, tmp_path):
+    job_id = "cancel-running-test"
+    job_name = "cancel_running_test"
+    running_task = asyncio.create_task(asyncio.Event().wait())
+    job_processor._running_job_tasks[job_id] = running_task
+    await state.set_initial_status(job_id, job_name, str(tmp_path))
+    await state.update_job_status(job_id, "RUNNING")
+
+    response = await client.post(f"/api/jobs/{job_id}/cancel")
+
+    with pytest.raises(asyncio.CancelledError):
+        await running_task
+    assert response.status_code == 200
+    assert response.json() == {"job_id": job_id, "status": "CANCELLED"}
+    assert await state.get_job_status(job_id) == "CANCELLED"
+    job_processor._running_job_tasks.pop(job_id, None)
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejects_terminal_or_unknown_job(client: httpx.AsyncClient, tmp_path):
+    unknown = await client.post("/api/jobs/missing/cancel")
+    assert unknown.status_code == 404
+
+    await state.set_initial_status("completed-job", "completed_test", str(tmp_path))
+    await state.update_job_status("completed-job", "COMPLETED", {"ok": True})
+    terminal = await client.post("/api/jobs/completed-job/cancel")
+    assert terminal.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_worker_skips_cancelled_queued_job(monkeypatch):
+    job = {"job_id": "skip-cancelled-job", "jobname": "skip_cancelled", "script_path": "/tmp/script.py"}
+    queue_items = iter((job, None))
+    dispatched = []
+    task_done_calls = []
+    await state.add_submitted_job(job["jobname"])
+    job_processor.job_queue.cancel_job(job["job_id"])
+
+    async def fake_get_job():
+        return next(queue_items)
+
+    async def fake_dispatch_job(received_job):
+        dispatched.append(received_job)
+
+    monkeypatch.setattr(job_processor.job_queue, "get_job", fake_get_job)
+    monkeypatch.setattr(job_processor.job_queue, "task_done", lambda: task_done_calls.append(True))
+    monkeypatch.setattr(job_processor, "_dispatch_job", fake_dispatch_job)
+
+    await job_processor._worker()
+
+    assert dispatched == []
+    assert task_done_calls == [True, True]
+    assert not await state.is_job_submitted(job["jobname"])
 
 
 @pytest.mark.asyncio
