@@ -15,6 +15,7 @@ from src.core import state_manager as state
 from src.main import app
 from src.worker import job_processor
 from src.core import playwright_manager
+from src.common import tool_utils
 
 # 테스트용 간단한 스크립트 파일 내용
 DUMMY_SCRIPT_CONTENT = """
@@ -139,6 +140,22 @@ async def test_lifespan_stops_resource_monitor(monkeypatch):
         pass
 
     assert calls == ["start", "stop"]
+
+
+@pytest.mark.asyncio
+async def test_periodic_cleanup_offloads_file_cleanup(monkeypatch):
+    calls = []
+
+    async def fake_to_thread(function):
+        calls.append(function)
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr("src.common.tool_utils.asyncio.to_thread", fake_to_thread)
+
+    with pytest.raises(asyncio.CancelledError):
+        await tool_utils.periodic_cleanup()
+
+    assert calls == [tool_utils.clean_old_jobs]
 
 
 @pytest.mark.asyncio

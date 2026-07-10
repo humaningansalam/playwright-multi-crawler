@@ -97,7 +97,7 @@ async def periodic_cleanup():
     logging.info("Periodic cleanup task started.")
     while True:
         try:
-            clean_old_jobs()
+            await asyncio.to_thread(clean_old_jobs)
         except Exception as e:
             logging.error(f"Error during periodic cleanup execution: {e}", exc_info=True)
 
