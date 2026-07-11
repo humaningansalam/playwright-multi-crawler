@@ -126,7 +126,7 @@ async def submit_job_endpoint(
     - **script_file**: 실행할 Python 크롤링 스크립트 
     - **additional_files**: 스크립트 실행에 필요한 추가 파일 목록
     """
-    if not jobname or not script_file or script_file.filename is None:
+    if not jobname.strip() or not script_file or script_file.filename is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Jobname and script file are required')
 
     if not getattr(request.app.state, "job_submission_enabled", False):

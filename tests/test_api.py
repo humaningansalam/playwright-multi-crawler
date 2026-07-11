@@ -598,6 +598,19 @@ async def test_submit_rejects_reserved_additional_filenames(client: httpx.AsyncC
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("jobname", [" ", "\t", "\r\n"])
+async def test_submit_rejects_blank_job_names(client: httpx.AsyncClient, jobname):
+    response = await client.post(
+        "/api/jobs/submit",
+        data={"jobname": jobname},
+        files=[("script_file", ("crawl.py", DUMMY_SCRIPT_CONTENT, "text/x-python"))],
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Jobname and script file are required"}
+
+
+@pytest.mark.asyncio
 async def test_submit_rejects_duplicate_additional_filenames(client: httpx.AsyncClient):
     response = await client.post(
         "/api/jobs/submit",
