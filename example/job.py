@@ -6,8 +6,6 @@ from pathlib import Path
 import logging
 from typing import List, Dict, Any, Optional
 
-from src.models.job import JobStatus
-
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -16,10 +14,10 @@ SERVER_URL = os.getenv('PLAYWRIGHT_URL', 'http://localhost:5000')
 POLL_INTERVAL_SECONDS = 10 # 상태 확인 간격 
 MAX_POLL_ATTEMPTS = 60 # 최대 상태 확인 횟수 
 TERMINAL_JOB_STATUSES = frozenset({
-    JobStatus.COMPLETED.value,
-    JobStatus.FAILED.value,
-    JobStatus.CANCELLED.value,
-    JobStatus.INTERRUPTED.value,
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "INTERRUPTED",
 })
 
 def default_crawl_script_path() -> str:

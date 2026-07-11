@@ -1,3 +1,7 @@
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from example import job
@@ -39,3 +43,21 @@ def test_bundled_client_terminal_set_matches_public_job_status_enum():
         JobStatus.CANCELLED.value,
         JobStatus.INTERRUPTED.value,
     }
+
+
+def test_bundled_client_is_importable_from_its_script_directory():
+    example_dir = Path(job.__file__).parent
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import runpy; runpy.run_path('job.py', run_name='not_main')",
+        ],
+        cwd=example_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
