@@ -6,6 +6,8 @@ from pathlib import Path
 import logging
 from typing import List, Dict, Any, Optional
 
+from src.models.job import JobStatus
+
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -13,6 +15,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 SERVER_URL = os.getenv('PLAYWRIGHT_URL', 'http://localhost:5000') 
 POLL_INTERVAL_SECONDS = 10 # 상태 확인 간격 
 MAX_POLL_ATTEMPTS = 60 # 최대 상태 확인 횟수 
+TERMINAL_JOB_STATUSES = frozenset({
+    JobStatus.COMPLETED.value,
+    JobStatus.FAILED.value,
+    JobStatus.CANCELLED.value,
+    JobStatus.INTERRUPTED.value,
+})
 
 def default_crawl_script_path() -> str:
     return str(Path(__file__).with_name("crawl.py"))
@@ -105,7 +113,7 @@ def submit_job(script_path: str, job_name: str, additional_files_info: Optional[
 
 def poll_job_status(job_id: str) -> Optional[str]:
     """
-    작업 상태를 폴링하고 최종 상태 ('COMPLETED', 'FAILED', 'TIMEOUT', None)를 반환합니다.
+    작업 상태를 폴링하고 최종 상태 또는 ('TIMEOUT', None)를 반환합니다.
 
     Args:
         job_id: 확인할 작업 ID.
@@ -128,7 +136,7 @@ def poll_job_status(job_id: str) -> Optional[str]:
             current_status = status_data.get('status')
             logging.info(f"Attempt {attempt + 1}/{MAX_POLL_ATTEMPTS}: Job status = {current_status}")
 
-            if current_status in ['COMPLETED', 'FAILED']:
+            if current_status in TERMINAL_JOB_STATUSES:
                 logging.info(f"Job {job_id} reached final status: {current_status}")
                 return current_status # 최종 상태 도달
             elif current_status in ['PENDING', 'RUNNING']:
@@ -279,7 +287,7 @@ if __name__ == "__main__":
         final_status = poll_job_status(submitted_job_id)
 
         # 3. 결과 가져오기 
-        if final_status == 'COMPLETED' or final_status == 'FAILED':
+        if final_status in TERMINAL_JOB_STATUSES:
             get_job_results(submitted_job_id)
         elif final_status == 'TIMEOUT':
              logging.warning(f"Job {submitted_job_id} processing timed out from client perspective.")
