@@ -21,6 +21,19 @@ class _StatusResponse:
         return {"status": self._status}
 
 
+class _ResultResponse:
+    status_code = 200
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
 @pytest.mark.parametrize("status", [JobStatus.CANCELLED.value, JobStatus.INTERRUPTED.value])
 def test_bundled_client_stops_polling_for_all_non_success_terminal_statuses(monkeypatch, status):
     calls = []
@@ -61,3 +74,19 @@ def test_bundled_client_is_importable_from_its_script_directory():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_bundled_client_downloads_artifact_named_error(monkeypatch):
+    files = {"error": "/api/jobs/download/job-1/error"}
+    downloaded = []
+    response = _ResultResponse({"status": "COMPLETED", "files": files})
+
+    monkeypatch.setattr(job.requests, "get", lambda _url, timeout: response)
+    monkeypatch.setattr(job, "download_files", lambda job_id, listing: downloaded.append((job_id, listing)))
+
+    assert job.get_job_results("job-1") == {"status": "COMPLETED", "files": files}
+    assert downloaded == [("job-1", files)]
+
+
+def test_bundled_client_rejects_non_download_error_listing():
+    assert not job._is_downloadable_file_listing({"error": "Could not list result files"})

@@ -198,14 +198,15 @@ def get_job_results(job_id: str) -> Optional[Dict[str, Any]]:
         print("-" * 60)
 
         # 파일 정보 출력 및 다운로드 트리거
-        if 'files' in results_data and results_data['files'] and 'error' not in results_data['files']:
+        files = results_data.get('files')
+        if _is_downloadable_file_listing(files):
             logging.info("Result files available:")
-            for filename, download_url_path in results_data['files'].items():
+            for filename, download_url_path in files.items():
                 logging.info(f"- {filename}: {SERVER_URL}{download_url_path}")
             # 파일 다운로드 실행
-            download_files(job_id, results_data['files'])
-        elif 'files' in results_data and 'error' in results_data['files']:
-             logging.error(f"Server reported an error listing files: {results_data['files']['error']}")
+            download_files(job_id, files)
+        elif isinstance(files, dict) and 'error' in files:
+             logging.error(f"Server reported an error listing files: {files['error']}")
         else:
              logging.info("No result files found or reported.")
 
@@ -220,6 +221,13 @@ def get_job_results(job_id: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logging.error(f"An unexpected error occurred while fetching results: {e}")
         return None
+
+
+def _is_downloadable_file_listing(files: Any) -> bool:
+    return isinstance(files, dict) and bool(files) and all(
+        isinstance(path, str) and path.startswith('/api/jobs/download/')
+        for path in files.values()
+    )
 
 def download_files(job_id: str, files_dict: Dict[str, str]):
     """
