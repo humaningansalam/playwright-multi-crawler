@@ -12,6 +12,7 @@ from src.config import JOB_FOLDER
 from src.api import jobs as jobs_api
 from src.api.jobs import download_file_endpoint, stream_job_logs_endpoint
 from src.core import state_manager as state
+from src.core import job_queue
 from src.main import app
 from src.worker import job_processor
 from src.core import playwright_manager
@@ -373,6 +374,27 @@ async def test_worker_skips_cancelled_queued_job(monkeypatch):
     assert dispatched == []
     assert task_done_calls == [True, True]
     assert not await state.is_job_submitted(job["jobname"])
+
+
+@pytest.mark.asyncio
+async def test_cancel_claimed_pending_job_cancels_registered_dispatch_task(client: httpx.AsyncClient, tmp_path):
+    job_id = "claimed-pending-cancel"
+    job_name = "claimed_pending_cancel"
+    await state.set_initial_status(job_id, job_name, str(tmp_path))
+    assert job_queue.claim_job(job_id)
+
+    task = asyncio.create_task(asyncio.Event().wait())
+    job_processor._running_job_tasks[job_id] = task
+    try:
+        response = await client.post(f"/api/jobs/{job_id}/cancel")
+        await asyncio.sleep(0)
+
+        assert response.json() == {"job_id": job_id, "status": "CANCELLED"}
+        assert task.cancelled()
+        assert await state.get_job_status(job_id) == "CANCELLED"
+    finally:
+        job_processor._running_job_tasks.pop(job_id, None)
+        job_queue.release_job(job_id)
 
 
 @pytest.mark.asyncio

@@ -254,7 +254,7 @@ async def _worker():
         if job is None:
             job_queue.task_done()
             break
-        if job_queue.consume_cancellation(job["job_id"]):
+        if not job_queue.claim_job(job["job_id"]):
             await state.remove_submitted_job(job["jobname"])
             job_queue.task_done()
             continue
@@ -263,6 +263,7 @@ async def _worker():
         except Exception as e:
             logging.error(f"Unhandled exception in worker loop: {e}", exc_info=True)
         finally:
+            job_queue.release_job(job["job_id"])
             job_queue.task_done()
     logging.info(f"Worker task stopped: {asyncio.current_task().get_name()}")
 

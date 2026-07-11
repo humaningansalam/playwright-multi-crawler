@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional
 
 _queue = asyncio.Queue()
 _cancelled_job_ids = set()
+_claimed_job_ids = set()
 
 async def add_job(job_data: Dict[str, Any]):
     """작업 큐에 작업 추가"""
@@ -11,9 +12,12 @@ async def add_job(job_data: Dict[str, Any]):
     logging.debug(f"Job {job_data.get('job_id', '')} added to queue.")
 
 
-def cancel_job(job_id: str) -> None:
-    """Mark a queued job so a worker skips it when it reaches the queue head."""
+def cancel_job(job_id: str) -> bool:
+    """Mark an unclaimed queued job for cancellation."""
+    if job_id in _claimed_job_ids:
+        return False
     _cancelled_job_ids.add(job_id)
+    return True
 
 
 def consume_cancellation(job_id: str) -> bool:
@@ -21,6 +25,18 @@ def consume_cancellation(job_id: str) -> bool:
         return False
     _cancelled_job_ids.remove(job_id)
     return True
+
+
+def claim_job(job_id: str) -> bool:
+    """Atomically consume a queued cancellation mark or claim the job for dispatch."""
+    if consume_cancellation(job_id):
+        return False
+    _claimed_job_ids.add(job_id)
+    return True
+
+
+def release_job(job_id: str) -> None:
+    _claimed_job_ids.discard(job_id)
 
 async def get_job() -> Optional[Dict[str, Any]]:
     """큐에서 작업 가져오기 """

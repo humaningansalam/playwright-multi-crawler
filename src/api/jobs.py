@@ -213,7 +213,9 @@ async def cancel_job_endpoint(job_id: str):
         if not job_processor.cancel_running_job(job_id):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is already terminal")
     else:
-        job_queue.cancel_job(job_id)
+        if not job_queue.cancel_job(job_id):
+            if not job_processor.cancel_running_job(job_id):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is already terminal")
 
     await state.update_job_status(job_id, JobStatus.CANCELLED, {"error": "cancelled"})
     if current_status == JobStatus.PENDING:
