@@ -323,7 +323,7 @@ async def _stream_job_logs(job_id: str, job_path: str):
                 yield f"event: {event_name}\ndata: {json.dumps(content)}\n\n"
 
         job_status = await state.get_job_status(job_id)
-        if job_status in TERMINAL_JOB_STATUSES:
+        if job_status in TERMINAL_JOB_STATUSES and not job_processor.is_job_running(job_id):
             return
         await asyncio.sleep(0.1)
 

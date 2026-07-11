@@ -277,6 +277,11 @@ def cancel_running_job(job_id: str) -> bool:
     task.cancel()
     return True
 
+
+def is_job_running(job_id: str) -> bool:
+    task = _running_job_tasks.get(job_id)
+    return task is not None and not task.done()
+
 async def _worker():
     """큐에서 작업을 가져와 처리"""
     logging.info(f"Worker task started: {asyncio.current_task().get_name()}")

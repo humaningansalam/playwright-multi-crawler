@@ -373,6 +373,38 @@ async def test_stream_job_logs_replays_completed_job_output(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_stream_job_logs_waits_for_cancelled_process_output_drain(tmp_path):
+    job_id = "cancelled-stream-tail"
+    await state.set_initial_status(job_id, "cancelled_stream_tail", str(tmp_path))
+    (tmp_path / "stdout.log").write_text("before cancel\n", encoding="utf-8")
+
+    process_done = asyncio.Event()
+    process_task = asyncio.create_task(process_done.wait())
+    job_processor._running_job_tasks[job_id] = process_task
+    stream = jobs_api._stream_job_logs(job_id, str(tmp_path))
+    try:
+        assert await anext(stream) == 'event: stdout\ndata: "before cancel\\n"\n\n'
+        await state.update_job_status(job_id, JobStatus.CANCELLED, {"error": "cancelled"})
+
+        next_chunk = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0.15)
+        assert not next_chunk.done()
+
+        with (tmp_path / "stdout.log").open("a", encoding="utf-8") as log_file:
+            log_file.write("after cancel\n")
+        process_done.set()
+        await process_task
+
+        assert await next_chunk == 'event: stdout\ndata: "after cancel\\n"\n\n'
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+    finally:
+        process_done.set()
+        await process_task
+        job_processor._running_job_tasks.pop(job_id, None)
+
+
+@pytest.mark.asyncio
 async def test_interrupted_job_is_a_terminal_result_and_stops_log_stream(client: httpx.AsyncClient, tmp_path):
     job_id = "interrupted-job"
     await state.set_initial_status(job_id, "interrupted", str(tmp_path))
