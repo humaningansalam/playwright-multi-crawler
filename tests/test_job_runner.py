@@ -265,6 +265,52 @@ async def test_job_processor_terminates_process_group(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_job_processor_terminates_group_after_direct_runner_exits(monkeypatch):
+    signals = []
+
+    class _ExitedProcess:
+        pid = 4321
+        returncode = 0
+
+    process = _ExitedProcess()
+    if os.name == "posix":
+        monkeypatch.setattr(job_processor.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+
+    await job_processor._terminate_process(process, "job-1")
+
+    if os.name == "posix":
+        assert signals == [(process.pid, signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
+async def test_job_processor_escalates_when_output_pipes_do_not_close(monkeypatch):
+    release_streams = asyncio.Event()
+    termination_calls = []
+
+    async def delayed_tail(value):
+        await release_streams.wait()
+        return value
+
+    class _ExitedProcess:
+        returncode = 0
+
+    async def fake_terminate(process, job_id, force=False):
+        termination_calls.append((process, job_id, force))
+        release_streams.set()
+
+    monkeypatch.setattr(job_processor, "LOG_DRAIN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
+
+    stdout_task = asyncio.create_task(delayed_tail("stdout"))
+    stderr_task = asyncio.create_task(delayed_tail("stderr"))
+    process = _ExitedProcess()
+    result = await job_processor._drain_output_tasks(stdout_task, stderr_task, process, "job-1")
+
+    assert result == ("stdout", "stderr")
+    assert termination_calls == [(process, "job-1", True)]
+
+
+@pytest.mark.asyncio
 async def test_job_processor_terminates_process_group_when_cancelled(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text("# test script\n", encoding="utf-8")

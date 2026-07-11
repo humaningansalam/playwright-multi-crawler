@@ -21,6 +21,7 @@ STDOUT_LOG_FILENAME = "stdout.log"
 STDERR_LOG_FILENAME = "stderr.log"
 LOG_READ_CHUNK_BYTES = 64 * 1024
 LOG_TAIL_BYTES = 64 * 1024
+LOG_DRAIN_TIMEOUT_SECONDS = 5.0
 
 _workers: List[asyncio.Task] = []
 _running_job_tasks: Dict[str, asyncio.Task] = {}
@@ -61,18 +62,23 @@ async def _stream_output_to_log(stream: asyncio.StreamReader, path: str) -> str:
     return tail.decode("utf-8", errors="replace").strip()
 
 
-async def _terminate_process(proc: asyncio.subprocess.Process, job_id: str) -> None:
-    if proc.returncode is not None:
-        return
+async def _terminate_process(proc: asyncio.subprocess.Process, job_id: str, force: bool = False) -> None:
     logging.warning(f"Terminating job subprocess group for {job_id}.")
     try:
         if os.name == "posix":
-            os.killpg(proc.pid, signal.SIGTERM)
+            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
         else:
-            proc.terminate()
+            if proc.returncode is not None:
+                return
+            if force:
+                proc.kill()
+            else:
+                proc.terminate()
     except ProcessLookupError:
         return
 
+    if proc.returncode is not None:
+        return
     try:
         await asyncio.wait_for(proc.wait(), timeout=5.0)
     except asyncio.TimeoutError:
@@ -85,6 +91,22 @@ async def _terminate_process(proc: asyncio.subprocess.Process, job_id: str) -> N
         except ProcessLookupError:
             return
         await proc.wait()
+
+
+async def _drain_output_tasks(
+    stdout_task: asyncio.Task,
+    stderr_task: asyncio.Task,
+    proc: asyncio.subprocess.Process,
+    job_id: str,
+) -> tuple[str, str]:
+    output_tasks = asyncio.gather(stdout_task, stderr_task)
+    try:
+        output = await asyncio.wait_for(asyncio.shield(output_tasks), timeout=LOG_DRAIN_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logging.warning(f"Job {job_id} output pipes did not close; killing its process group.")
+        await _terminate_process(proc, job_id, force=True)
+        output = await asyncio.wait_for(output_tasks, timeout=LOG_DRAIN_TIMEOUT_SECONDS)
+    return tuple(output)
 
 
 async def _process_job_internal(script_path: str, jobname: str, job_id: str):
@@ -142,7 +164,9 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
             except asyncio.TimeoutError:
                 timed_out = True
                 await _terminate_process(proc, job_id)
-            stdout_decoded, stderr_decoded = await asyncio.gather(stdout_task, stderr_task)
+            stdout_decoded, stderr_decoded = await _drain_output_tasks(
+                stdout_task, stderr_task, proc, job_id
+            )
         else:
             # Compatibility path for test doubles that do not expose stream readers.
             try:
