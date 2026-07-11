@@ -88,7 +88,7 @@ curl -X POST http://localhost:5000/api/jobs/<job_id>/cancel
 curl http://localhost:5000/api/jobs/results/<job_id>
 ```
 
-`PENDING` 또는 `RUNNING` 결과 조회는 아직 처리 중이라는 응답을 반환합니다. 종료 상태인 `COMPLETED`, `FAILED`, `CANCELLED`에서는 결과 데이터, 로그의 마지막 64 KiB, 그리고 작업 폴더 파일의 다운로드 URL을 받습니다.
+`PENDING` 또는 `RUNNING` 결과 조회는 아직 처리 중이라는 응답을 반환합니다. 종료 상태인 `COMPLETED`, `FAILED`, `CANCELLED`, `INTERRUPTED`에서는 결과 데이터, 로그의 마지막 64 KiB, 그리고 작업 폴더 파일의 다운로드 URL을 받습니다.
 
 결과 파일 다운로드
 
