@@ -3,9 +3,9 @@
 # Playwright 관련 객체 (모듈 레벨에서 관리)
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 from playwright.async_api import async_playwright, Playwright, Browser
-from src.config import CDP_PORT
+from src.config import BROWSER_EXECUTABLE_PATH, CDP_PORT
 
 _playwright: Optional[Playwright] = None
 _browser: Optional[Browser] = None
@@ -18,6 +18,21 @@ def _on_browser_disconnected() -> None:
         return
     logging.critical("Shared Chromium disconnected unexpectedly; exiting for service recovery.")
     _exit_process(1)
+
+
+def _browser_launch_options() -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "headless": False,
+        "args": [
+            f"--remote-debugging-port={CDP_PORT}",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+        ],
+    }
+    if BROWSER_EXECUTABLE_PATH:
+        options["executable_path"] = BROWSER_EXECUTABLE_PATH
+    return options
 
 async def start() -> None:
     """
@@ -36,15 +51,7 @@ async def start() -> None:
     
     try:
         # 핵심: 원격 디버깅 포트 활성화
-        _browser = await _playwright.chromium.launch(
-            headless=False,  # 화면에 보임
-            args=[
-                f'--remote-debugging-port={CDP_PORT}',
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
-                '--disable-dev-shm-usage'
-            ]
-        )
+        _browser = await _playwright.chromium.launch(**_browser_launch_options())
         _browser.on("disconnected", _on_browser_disconnected)
         logging.info(f"Browser Server launched. Listening at http://127.0.0.1:{CDP_PORT}")
     except Exception as e:

@@ -29,6 +29,23 @@ def test_job_api_status_sets_use_shared_enum():
         JobStatus.INTERRUPTED,
     })
 
+
+def test_browser_launch_options_omit_executable_by_default(monkeypatch):
+    monkeypatch.setattr(playwright_manager, "BROWSER_EXECUTABLE_PATH", None)
+
+    options = playwright_manager._browser_launch_options()
+
+    assert options["headless"] is False
+    assert "executable_path" not in options
+
+
+def test_browser_launch_options_use_configured_executable(monkeypatch):
+    monkeypatch.setattr(playwright_manager, "BROWSER_EXECUTABLE_PATH", "/usr/bin/google-chrome")
+
+    options = playwright_manager._browser_launch_options()
+
+    assert options["executable_path"] == "/usr/bin/google-chrome"
+
 # 테스트용 간단한 스크립트 파일 내용
 DUMMY_SCRIPT_CONTENT = """
 import asyncio
