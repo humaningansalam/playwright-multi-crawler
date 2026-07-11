@@ -390,13 +390,15 @@ async def test_interrupted_job_is_a_terminal_result_and_stops_log_stream(client:
 
 
 @pytest.mark.asyncio
-async def test_worker_skips_cancelled_queued_job(monkeypatch):
+async def test_worker_skips_cancelled_queued_job_without_releasing_resubmitted_name(monkeypatch):
     job = {"job_id": "skip-cancelled-job", "jobname": "skip_cancelled", "script_path": "/tmp/script.py"}
     queue_items = iter((job, None))
     dispatched = []
     task_done_calls = []
     await state.add_submitted_job(job["jobname"])
     job_processor.job_queue.cancel_job(job["job_id"])
+    await state.remove_submitted_job(job["jobname"])
+    assert await state.add_submitted_job(job["jobname"])
 
     async def fake_get_job():
         return next(queue_items)
@@ -412,7 +414,7 @@ async def test_worker_skips_cancelled_queued_job(monkeypatch):
 
     assert dispatched == []
     assert task_done_calls == [True, True]
-    assert not await state.is_job_submitted(job["jobname"])
+    assert await state.is_job_submitted(job["jobname"])
 
 
 @pytest.mark.asyncio

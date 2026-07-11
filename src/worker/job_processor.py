@@ -286,7 +286,6 @@ async def _worker():
             job_queue.task_done()
             break
         if not job_queue.claim_job(job["job_id"]):
-            await state.remove_submitted_job(job["jobname"])
             job_queue.task_done()
             continue
         try:
