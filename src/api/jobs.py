@@ -25,7 +25,13 @@ router = APIRouter(
     tags=["Jobs"],      # Swagger UI 그룹화 태그
 )
 
-RESERVED_JOB_FILENAMES = {"script.py", "result.json", "result.json.tmp"}
+RESERVED_JOB_FILENAMES = {
+    "script.py",
+    "result.json",
+    "result.json.tmp",
+    "stdout.log",
+    "stderr.log",
+}
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 LOG_FILENAMES = ("stdout.log", "stderr.log")
 ACTIVE_JOB_STATUSES = frozenset({JobStatus.PENDING, JobStatus.RUNNING})

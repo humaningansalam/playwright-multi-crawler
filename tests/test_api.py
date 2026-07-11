@@ -547,7 +547,10 @@ async def test_submit_additional_file_rejects_path_traversal(client: httpx.Async
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("filename", ["script.py", "result.json", "result.json.tmp"])
+@pytest.mark.parametrize(
+    "filename",
+    ["script.py", "result.json", "result.json.tmp", "stdout.log", "stderr.log"],
+)
 async def test_submit_rejects_reserved_additional_filenames(client: httpx.AsyncClient, filename):
     response = await client.post(
         "/api/jobs/submit",
