@@ -22,7 +22,12 @@ from src.models.job import JobStatus
 
 def test_job_api_status_sets_use_shared_enum():
     assert jobs_api.ACTIVE_JOB_STATUSES == frozenset({JobStatus.PENDING, JobStatus.RUNNING})
-    assert jobs_api.TERMINAL_JOB_STATUSES == frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
+    assert jobs_api.TERMINAL_JOB_STATUSES == frozenset({
+        JobStatus.COMPLETED,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+        JobStatus.INTERRUPTED,
+    })
 
 # 테스트용 간단한 스크립트 파일 내용
 DUMMY_SCRIPT_CONTENT = """
@@ -348,6 +353,23 @@ async def test_stream_job_logs_replays_completed_job_output(tmp_path):
     assert response.media_type == "text/event-stream"
     assert 'event: stdout\ndata: "hello stdout\\n"\n\n' in body
     assert 'event: stderr\ndata: "hello stderr\\n"\n\n' in body
+
+
+@pytest.mark.asyncio
+async def test_interrupted_job_is_a_terminal_result_and_stops_log_stream(client: httpx.AsyncClient, tmp_path):
+    job_id = "interrupted-job"
+    await state.set_initial_status(job_id, "interrupted", str(tmp_path))
+    await state.update_job_status(job_id, JobStatus.INTERRUPTED, {"error": "shutdown"})
+
+    results_response = await client.get(f"/api/jobs/results/{job_id}")
+
+    assert results_response.status_code == 200
+    assert results_response.json()["status"] == JobStatus.INTERRUPTED
+    assert results_response.json()["result"] == {"error": "shutdown"}
+
+    stream = jobs_api._stream_job_logs(job_id, str(tmp_path))
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
 
 
 @pytest.mark.asyncio

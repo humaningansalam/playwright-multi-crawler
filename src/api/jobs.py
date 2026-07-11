@@ -29,7 +29,12 @@ RESERVED_JOB_FILENAMES = {"script.py", "result.json", "result.json.tmp"}
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 LOG_FILENAMES = ("stdout.log", "stderr.log")
 ACTIVE_JOB_STATUSES = frozenset({JobStatus.PENDING, JobStatus.RUNNING})
-TERMINAL_JOB_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
+TERMINAL_JOB_STATUSES = frozenset({
+    JobStatus.COMPLETED,
+    JobStatus.FAILED,
+    JobStatus.CANCELLED,
+    JobStatus.INTERRUPTED,
+})
 
 
 def _error_response(description: str) -> Dict[str, Any]:
