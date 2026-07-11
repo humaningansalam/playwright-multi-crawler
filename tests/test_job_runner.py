@@ -302,3 +302,59 @@ async def test_job_processor_terminates_process_group_when_cancelled(monkeypatch
         await task
 
     assert terminated == [(process, "job-1")]
+
+
+@pytest.mark.asyncio
+async def test_job_processor_retains_log_tails_when_cancelled(monkeypatch, tmp_path):
+    script_path = tmp_path / "script.py"
+    script_path.write_text("# test script\n", encoding="utf-8")
+    wait_started = asyncio.Event()
+    state_updates = []
+
+    class _FakeProcess:
+        returncode = None
+
+        def __init__(self):
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stdout.feed_data(b"stdout before cancel\n")
+            self.stderr.feed_data(b"stderr before cancel\n")
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
+
+        async def wait(self):
+            wait_started.set()
+            await asyncio.Event().wait()
+
+    process = _FakeProcess()
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    async def fake_terminate(_process, _job_id):
+        return None
+
+    async def capture_state_update(*args, **kwargs):
+        state_updates.append((args, kwargs))
+
+    async def ignore_remove_submitted_job(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
+    monkeypatch.setattr(job_processor.state, "update_job_status", capture_state_update)
+    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_remove_submitted_job)
+
+    task = asyncio.create_task(job_processor._process_job_internal(str(script_path), "cancel-logs", "job-1"))
+    await wait_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    final_update = state_updates[-1]
+    assert final_update[0][1] == job_processor.JobStatus.CANCELLED
+    assert final_update[0][4] == {
+        "stdout": "stdout before cancel",
+        "stderr": "stderr before cancel",
+    }

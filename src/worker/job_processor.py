@@ -114,6 +114,8 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     logs: Optional[Dict[str, str]] = None
     timed_out = False
     proc: Optional[asyncio.subprocess.Process] = None
+    stdout_task: Optional[asyncio.Task] = None
+    stderr_task: Optional[asyncio.Task] = None
 
     try:
         # 서브프로세스 실행 (비동기)
@@ -191,6 +193,11 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     except asyncio.CancelledError:
         if proc is not None:
             await _terminate_process(proc, job_id)
+        if stdout_task is not None and stderr_task is not None:
+            stdout_decoded, stderr_decoded = await asyncio.shield(
+                asyncio.gather(stdout_task, stderr_task)
+            )
+            logs = {"stdout": stdout_decoded, "stderr": stderr_decoded}
         final_status = JobStatus.CANCELLED
         result_data = {"error": "cancelled"}
         raise
