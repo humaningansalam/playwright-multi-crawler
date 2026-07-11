@@ -404,3 +404,56 @@ async def test_job_processor_retains_log_tails_when_cancelled(monkeypatch, tmp_p
         "stdout": "stdout before cancel",
         "stderr": "stderr before cancel",
     }
+
+
+@pytest.mark.asyncio
+async def test_job_processor_uses_bounded_drain_when_cancelled(monkeypatch, tmp_path):
+    script_path = tmp_path / "script.py"
+    script_path.write_text("# test script\n", encoding="utf-8")
+    wait_started = asyncio.Event()
+    drain_calls = []
+
+    class _FakeProcess:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+
+        async def wait(self):
+            wait_started.set()
+            await asyncio.Event().wait()
+
+    process = _FakeProcess()
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    async def fake_terminate(*_args, **_kwargs):
+        return None
+
+    async def fake_drain(stdout_task, stderr_task, received_process, job_id):
+        drain_calls.append((stdout_task, stderr_task, received_process, job_id))
+        stdout_task.cancel()
+        stderr_task.cancel()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        return "stdout", "stderr"
+
+    async def ignore_state_update(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
+    monkeypatch.setattr(job_processor, "_drain_output_tasks", fake_drain)
+    monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
+    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_state_update)
+
+    task = asyncio.create_task(job_processor._process_job_internal(str(script_path), "cancel-drain", "job-1"))
+    await wait_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(drain_calls) == 1
+    assert drain_calls[0][2:] == (process, "job-1")

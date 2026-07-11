@@ -218,8 +218,8 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
         if proc is not None:
             await _terminate_process(proc, job_id)
         if stdout_task is not None and stderr_task is not None:
-            stdout_decoded, stderr_decoded = await asyncio.shield(
-                asyncio.gather(stdout_task, stderr_task)
+            stdout_decoded, stderr_decoded = await _drain_output_tasks(
+                stdout_task, stderr_task, proc, job_id
             )
             logs = {"stdout": stdout_decoded, "stderr": stderr_decoded}
         final_status = JobStatus.CANCELLED
