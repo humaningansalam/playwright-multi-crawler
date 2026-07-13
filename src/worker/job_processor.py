@@ -270,11 +270,13 @@ async def _dispatch_job(job: Dict[str, Any]):
         _running_job_tasks.pop(job_id, None)
 
 
-def cancel_running_job(job_id: str) -> bool:
+async def cancel_running_job(job_id: str) -> bool:
     task = _running_job_tasks.get(job_id)
     if task is None or task.done():
         return False
-    task.cancel()
+    if not task.cancel():
+        return False
+    await asyncio.gather(task, return_exceptions=True)
     return True
 
 

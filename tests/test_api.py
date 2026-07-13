@@ -522,22 +522,49 @@ async def test_cancel_pending_job_marks_it_cancelled_and_removes_submission(clie
 
 
 @pytest.mark.asyncio
-async def test_cancel_running_job_cancels_only_the_job_task(client: httpx.AsyncClient, tmp_path):
+async def test_cancel_running_job_waits_for_terminal_metadata(client: httpx.AsyncClient, tmp_path):
     job_id = "cancel-running-test"
     job_name = "cancel_running_test"
-    running_task = asyncio.create_task(asyncio.Event().wait())
+    cleanup_started = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+
+    async def running_job():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await finish_cleanup.wait()
+            await state.update_job_status(
+                job_id,
+                JobStatus.CANCELLED,
+                {"error": "cancelled"},
+                duration=1.25,
+                logs={"stdout": "tail output", "stderr": ""},
+            )
+
+    running_task = asyncio.create_task(running_job())
     job_processor._running_job_tasks[job_id] = running_task
     await state.set_initial_status(job_id, job_name, str(tmp_path))
-    await state.update_job_status(job_id, "RUNNING")
+    await state.update_job_status(job_id, JobStatus.RUNNING)
 
-    response = await client.post(f"/api/jobs/{job_id}/cancel")
+    response_task = asyncio.create_task(client.post(f"/api/jobs/{job_id}/cancel"))
+    try:
+        await cleanup_started.wait()
+        await asyncio.sleep(0)
+        assert not response_task.done()
 
-    with pytest.raises(asyncio.CancelledError):
-        await running_task
-    assert response.status_code == 200
-    assert response.json() == {"job_id": job_id, "status": "CANCELLED"}
-    assert await state.get_job_status(job_id) == "CANCELLED"
-    job_processor._running_job_tasks.pop(job_id, None)
+        finish_cleanup.set()
+        response = await response_task
+        results = await client.get(f"/api/jobs/results/{job_id}")
+
+        assert response.status_code == 200
+        assert response.json() == {"job_id": job_id, "status": "CANCELLED"}
+        assert results.json()["logs"] == {"stdout": "tail output", "stderr": ""}
+        assert results.json()["duration_seconds"] == 1.25
+    finally:
+        finish_cleanup.set()
+        await asyncio.gather(response_task, running_task, return_exceptions=True)
+        job_processor._running_job_tasks.pop(job_id, None)
 
 
 @pytest.mark.asyncio
