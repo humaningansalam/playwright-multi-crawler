@@ -66,7 +66,7 @@ curl -X POST http://localhost:5000/api/jobs/submit \
 
 성공하면 `202 Accepted`와 `job_id`, `PENDING` 상태를 받습니다. 동일한 `jobname`이 대기 또는 실행 중이면 `409 Conflict`를 받습니다. 워커가 준비되지 않았으면 작업 폴더나 상태를 만들지 않고 `503`을 반환합니다.
 
-`additional_files`는 작업 폴더의 최상위 파일명만 사용할 수 있습니다. 경로, `..`, 중복 파일명, 그리고 runner가 사용하는 `script.py`, `result.json`, `result.json.tmp`는 거부됩니다.
+`additional_files`는 작업 폴더의 최상위 파일명만 사용할 수 있습니다. 경로, `..`, 중복 파일명, 그리고 runner가 사용하는 `script.py`, `result.json`, `result.json.tmp`, `stdout.log`, `stderr.log`는 거부됩니다.
 
 ### 작업 상태와 취소
 

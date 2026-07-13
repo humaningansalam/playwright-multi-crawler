@@ -3,6 +3,7 @@ import inspect
 from pathlib import Path
 
 from example.job import default_crawl_script_path
+from src.api.jobs import RESERVED_JOB_FILENAMES
 
 
 def test_example_client_default_crawl_script_exists():
@@ -23,6 +24,17 @@ def test_readme_submit_example_does_not_require_missing_additional_file():
     readme = Path(__file__).resolve().parents[1] / "README.md"
 
     assert '@textfile.txt' not in readme.read_text(encoding="utf-8")
+
+
+def test_readme_documents_all_reserved_additional_filenames():
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+    submission_section = readme.read_text(encoding="utf-8").split(
+        "### 작업 상태와 취소",
+        maxsplit=1,
+    )[0]
+
+    for filename in RESERVED_JOB_FILENAMES:
+        assert f"`{filename}`" in submission_section
 
 
 def test_bundled_example_is_importable_with_worker_loader():
