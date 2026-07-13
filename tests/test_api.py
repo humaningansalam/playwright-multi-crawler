@@ -1,5 +1,6 @@
 import asyncio
 import os
+import socket
 import tomllib
 import time
 from pathlib import Path
@@ -36,6 +37,7 @@ def test_browser_launch_options_omit_executable_by_default(monkeypatch):
     options = playwright_manager._browser_launch_options()
 
     assert options["headless"] is False
+    assert "--remote-debugging-address=127.0.0.1" in options["args"]
     assert "executable_path" not in options
 
 
@@ -45,6 +47,199 @@ def test_browser_launch_options_use_configured_executable(monkeypatch):
     options = playwright_manager._browser_launch_options()
 
     assert options["executable_path"] == "/usr/bin/google-chrome"
+
+
+class _FakeBrowser:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def on(self, event, _callback):
+        self.calls.append(f"browser.on:{event}")
+
+    async def close(self):
+        self.calls.append("browser.close")
+        playwright_manager._on_browser_disconnected()
+
+    def is_connected(self):
+        return True
+
+
+class _FakeChromium:
+    def __init__(self, browser, calls):
+        self.browser = browser
+        self.calls = calls
+
+    async def launch(self, **_options):
+        self.calls.append("chromium.launch")
+        return self.browser
+
+
+class _FakePlaywright:
+    def __init__(self, browser, calls):
+        self.chromium = _FakeChromium(browser, calls)
+        self.calls = calls
+
+    async def stop(self):
+        self.calls.append("playwright.stop")
+
+
+class _FakePlaywrightStarter:
+    def __init__(self, playwright, calls):
+        self.playwright = playwright
+        self.calls = calls
+
+    async def start(self):
+        self.calls.append("playwright.start")
+        return self.playwright
+
+
+def _install_fake_playwright(monkeypatch, calls):
+    browser = _FakeBrowser(calls)
+    playwright = _FakePlaywright(browser, calls)
+    starter = _FakePlaywrightStarter(playwright, calls)
+    monkeypatch.setattr(playwright_manager, "async_playwright", lambda: starter)
+    monkeypatch.setattr(playwright_manager, "_playwright", None)
+    monkeypatch.setattr(playwright_manager, "_browser", None)
+    monkeypatch.setattr(playwright_manager, "_shutting_down", False)
+    return browser, playwright
+
+
+@pytest.mark.asyncio
+async def test_browser_start_rejects_occupied_ipv4_cdp_port(monkeypatch):
+    calls = []
+
+    class _UnexpectedPlaywrightStarter:
+        async def start(self):
+            calls.append("playwright.start")
+            raise AssertionError(
+                "Playwright must not start while the CDP port is occupied"
+            )
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    occupied_port = listener.getsockname()[1]
+    monkeypatch.setattr(playwright_manager, "CDP_PORT", occupied_port)
+    monkeypatch.setattr(
+        playwright_manager,
+        "async_playwright",
+        lambda: _UnexpectedPlaywrightStarter(),
+    )
+    monkeypatch.setattr(playwright_manager, "_playwright", None)
+    monkeypatch.setattr(playwright_manager, "_browser", None)
+
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match=f"127.0.0.1:{occupied_port}.*already in use",
+        ):
+            await playwright_manager.start()
+    finally:
+        listener.close()
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_cdp_readiness_probe_requires_websocket_url(monkeypatch):
+    async def fetch_invalid_version():
+        return {"Browser": "Chrome/150"}
+
+    monkeypatch.setattr(
+        playwright_manager,
+        "_fetch_cdp_version",
+        fetch_invalid_version,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        playwright_manager,
+        "CDP_READY_TIMEOUT_SECONDS",
+        0,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="webSocketDebuggerUrl"):
+        await playwright_manager._wait_for_cdp_ready()
+
+
+@pytest.mark.asyncio
+async def test_browser_start_cleans_up_after_cdp_probe_failure(monkeypatch):
+    calls = []
+    _install_fake_playwright(monkeypatch, calls)
+    monkeypatch.setattr(
+        playwright_manager,
+        "_assert_cdp_port_available",
+        lambda: calls.append("cdp.preflight"),
+        raising=False,
+    )
+
+    async def fail_cdp_probe():
+        calls.append("cdp.probe")
+        raise RuntimeError("CDP endpoint did not become ready")
+
+    exit_codes = []
+    monkeypatch.setattr(
+        playwright_manager,
+        "_wait_for_cdp_ready",
+        fail_cdp_probe,
+        raising=False,
+    )
+    monkeypatch.setattr(playwright_manager, "_exit_process", lambda code: exit_codes.append(code))
+
+    with pytest.raises(RuntimeError, match="CDP endpoint did not become ready"):
+        await playwright_manager.start()
+
+    assert calls == [
+        "cdp.preflight",
+        "playwright.start",
+        "chromium.launch",
+        "cdp.probe",
+        "browser.close",
+        "playwright.stop",
+    ]
+    assert exit_codes == []
+    assert playwright_manager._browser is None
+    assert playwright_manager._playwright is None
+    assert playwright_manager._shutting_down is True
+
+
+@pytest.mark.asyncio
+async def test_browser_start_registers_disconnect_handler_after_cdp_probe(monkeypatch):
+    calls = []
+    browser, playwright = _install_fake_playwright(monkeypatch, calls)
+    monkeypatch.setattr(
+        playwright_manager,
+        "_assert_cdp_port_available",
+        lambda: calls.append("cdp.preflight"),
+        raising=False,
+    )
+
+    async def pass_cdp_probe():
+        calls.append("cdp.probe")
+
+    monkeypatch.setattr(
+        playwright_manager,
+        "_wait_for_cdp_ready",
+        pass_cdp_probe,
+        raising=False,
+    )
+
+    await playwright_manager.start()
+
+    assert calls == [
+        "cdp.preflight",
+        "playwright.start",
+        "chromium.launch",
+        "cdp.probe",
+        "browser.on:disconnected",
+    ]
+    assert playwright_manager._browser is browser
+    assert playwright_manager._playwright is playwright
+    assert playwright_manager._shutting_down is False
+
+    await playwright_manager.shutdown()
+    assert calls[-2:] == ["browser.close", "playwright.stop"]
+
 
 # 테스트용 간단한 스크립트 파일 내용
 DUMMY_SCRIPT_CONTENT = """
