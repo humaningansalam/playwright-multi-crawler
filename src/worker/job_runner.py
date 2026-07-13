@@ -59,7 +59,7 @@ async def run_user_script(job_id, script_path, job_path):
                 else:
                     raise AttributeError("The script must contain an async function named 'crawl'.")
 
-            except Exception as e:
+            except BaseException as e:
                 error_info = {
                     "error": str(e),
                     "traceback": traceback.format_exc()
@@ -79,7 +79,7 @@ async def run_user_script(job_id, script_path, job_path):
                     if error_info is None:
                         error_info = {"error": "Browser cleanup failed"}
                     error_info["cleanup_errors"] = cleanup_errors
-    except Exception as e:
+    except BaseException as e:
         if error_info is None:
             error_info = {
                 "error": str(e),

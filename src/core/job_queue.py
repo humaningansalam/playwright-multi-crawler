@@ -2,21 +2,28 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional
 
+from src.common.metrics import metrics
+
 _queue = asyncio.Queue()
 _cancelled_job_ids = set()
 _claimed_job_ids = set()
+_queued_job_ids = set()
 
 async def add_job(job_data: Dict[str, Any]):
     """작업 큐에 작업 추가"""
     await _queue.put(job_data)
+    _queued_job_ids.add(job_data["job_id"])
+    metrics.queued_jobs.set(qsize())
     logging.debug(f"Job {job_data.get('job_id', '')} added to queue.")
 
 
 def cancel_job(job_id: str) -> bool:
     """Mark an unclaimed queued job for cancellation."""
-    if job_id in _claimed_job_ids:
+    if job_id in _claimed_job_ids or job_id not in _queued_job_ids:
         return False
     _cancelled_job_ids.add(job_id)
+    _queued_job_ids.remove(job_id)
+    metrics.queued_jobs.set(qsize())
     return True
 
 
@@ -31,6 +38,8 @@ def claim_job(job_id: str) -> bool:
     """Atomically consume a queued cancellation mark or claim the job for dispatch."""
     if consume_cancellation(job_id):
         return False
+    _queued_job_ids.discard(job_id)
+    metrics.queued_jobs.set(qsize())
     _claimed_job_ids.add(job_id)
     return True
 
@@ -72,4 +81,4 @@ async def put_shutdown_signal(num_signals: int):
 
 def qsize() -> int:
     """현재 큐에 있는 항목 수 반환"""
-    return _queue.qsize()
+    return len(_queued_job_ids)

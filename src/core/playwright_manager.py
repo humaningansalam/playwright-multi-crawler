@@ -30,6 +30,9 @@ def _on_browser_disconnected() -> None:
 def _browser_launch_options() -> dict[str, Any]:
     options: dict[str, Any] = {
         "headless": False,
+        "handle_sigint": False,
+        "handle_sigterm": False,
+        "handle_sighup": False,
         "args": [
             f"--remote-debugging-port={CDP_PORT}",
             f"--remote-debugging-address={CDP_HOST}",

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import socket
 import tomllib
@@ -37,6 +38,9 @@ def test_browser_launch_options_omit_executable_by_default(monkeypatch):
     options = playwright_manager._browser_launch_options()
 
     assert options["headless"] is False
+    assert options["handle_sigint"] is False
+    assert options["handle_sigterm"] is False
+    assert options["handle_sighup"] is False
     assert "--remote-debugging-address=127.0.0.1" in options["args"]
     assert "executable_path" not in options
 
@@ -278,6 +282,125 @@ async def test_upload_save_reads_bounded_chunks(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_upload_save_does_not_block_event_loop(monkeypatch):
+    class _Upload:
+        def __init__(self):
+            self.chunks = iter((b"payload", b""))
+
+        async def read(self, _size):
+            return next(self.chunks)
+
+    class _SlowFile:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def write(self, _chunk):
+            time.sleep(0.1)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(jobs_api, "open", lambda *_args, **_kwargs: _SlowFile(), raising=False)
+
+    started = time.perf_counter()
+    save_task = asyncio.create_task(jobs_api._save_upload_file(_Upload(), "unused"))
+    await asyncio.sleep(0.01)
+    heartbeat_elapsed = time.perf_counter() - started
+    await save_task
+
+    assert heartbeat_elapsed < 0.05
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow_stage", ["open", "close"])
+async def test_upload_file_lifecycle_does_not_block_event_loop(monkeypatch, slow_stage):
+    class _Upload:
+        async def read(self, _size):
+            return b""
+
+    class _File:
+        def close(self):
+            if slow_stage == "close":
+                time.sleep(0.1)
+
+    def open_file(*_args, **_kwargs):
+        if slow_stage == "open":
+            time.sleep(0.1)
+        return _File()
+
+    monkeypatch.setattr(jobs_api, "open", open_file, raising=False)
+
+    started = time.perf_counter()
+    save_task = asyncio.create_task(jobs_api._save_upload_file(_Upload(), "unused"))
+    await asyncio.sleep(0.01)
+    heartbeat_elapsed = time.perf_counter() - started
+    await save_task
+
+    assert heartbeat_elapsed < 0.05
+
+
+@pytest.mark.asyncio
+async def test_upload_close_failure_does_not_replace_cancellation(monkeypatch):
+    read_started = asyncio.Event()
+
+    class _Upload:
+        async def read(self, _size):
+            read_started.set()
+            await asyncio.Event().wait()
+
+    class _File:
+        def close(self):
+            raise OSError("close failed")
+
+    monkeypatch.setattr(jobs_api, "open", lambda *_args, **_kwargs: _File(), raising=False)
+
+    save_task = asyncio.create_task(jobs_api._save_upload_file(_Upload(), "unused"))
+    await read_started.wait()
+    save_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await save_task
+
+
+@pytest.mark.asyncio
+async def test_request_file_operation_preserves_cancellation_after_disk_error():
+    def delayed_disk_error():
+        time.sleep(0.05)
+        raise OSError("disk failed")
+
+    operation = asyncio.create_task(jobs_api._run_file_operation(delayed_disk_error))
+    await asyncio.sleep(0.01)
+    operation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+
+
+@pytest.mark.asyncio
+async def test_submission_rollback_does_not_block_event_loop(monkeypatch, tmp_path):
+    job_path = tmp_path / "partial-job"
+    job_path.mkdir()
+
+    def slow_rmtree(_path):
+        time.sleep(0.1)
+
+    monkeypatch.setattr(jobs_api.shutil, "rmtree", slow_rmtree)
+
+    started = time.perf_counter()
+    rollback_task = asyncio.create_task(
+        jobs_api._rollback_job_submission("partial-job", "partial-job", str(job_path))
+    )
+    await asyncio.sleep(0.01)
+    heartbeat_elapsed = time.perf_counter() - started
+    await rollback_task
+
+    assert heartbeat_elapsed < 0.05
+
+
+@pytest.mark.asyncio
 async def test_submit_cancellation_rolls_back_reserved_name_and_job_folder(
     monkeypatch,
     tmp_path,
@@ -402,8 +525,8 @@ async def test_lifespan_stops_resource_monitor(monkeypatch):
 async def test_periodic_cleanup_offloads_file_cleanup(monkeypatch):
     calls = []
 
-    async def fake_to_thread(function):
-        calls.append(function)
+    async def fake_to_thread(function, excluded_job_ids):
+        calls.append((function, excluded_job_ids))
         raise asyncio.CancelledError()
 
     monkeypatch.setattr("src.common.tool_utils.asyncio.to_thread", fake_to_thread)
@@ -411,15 +534,16 @@ async def test_periodic_cleanup_offloads_file_cleanup(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await tool_utils.periodic_cleanup()
 
-    assert calls == [tool_utils.clean_old_jobs]
+    assert calls == [(tool_utils.clean_old_jobs, set())]
 
 
 @pytest.mark.asyncio
 async def test_periodic_cleanup_removes_state_for_deleted_job_folders(monkeypatch):
     removed_job_ids = []
 
-    async def fake_to_thread(function):
+    async def fake_to_thread(function, excluded_job_ids):
         assert function is tool_utils.clean_old_jobs
+        assert excluded_job_ids == set()
         return ["expired-job-1", "expired-job-2"]
 
     async def fake_remove_job_state(job_id):
@@ -436,6 +560,45 @@ async def test_periodic_cleanup_removes_state_for_deleted_job_folders(monkeypatc
         await tool_utils.periodic_cleanup()
 
     assert removed_job_ids == ["expired-job-1", "expired-job-2"]
+
+
+@pytest.mark.asyncio
+async def test_periodic_cleanup_preserves_old_active_job(monkeypatch, tmp_path):
+    job_id = "old-pending-job"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    (job_dir / "script.py").write_text("pass\n", encoding="utf-8")
+    old_timestamp = time.time() - (tool_utils.JOB_RETENTION_DAYS + 1) * 24 * 3600
+    os.utime(job_dir, (old_timestamp, old_timestamp))
+    await state.set_initial_status(job_id, "old_pending", str(job_dir))
+
+    async def stop_after_one_cleanup(_seconds):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(tool_utils, "JOB_FOLDER", str(tmp_path))
+    monkeypatch.setattr(tool_utils.asyncio, "sleep", stop_after_one_cleanup)
+
+    with pytest.raises(asyncio.CancelledError):
+        await tool_utils.periodic_cleanup()
+
+    assert job_dir.is_dir()
+    assert await state.get_job_status(job_id) == JobStatus.PENDING
+
+
+def test_cleanup_does_not_report_folder_deleted_when_rmtree_fails(monkeypatch, tmp_path):
+    job_dir = tmp_path / "expired-job"
+    job_dir.mkdir()
+    old_timestamp = time.time() - (tool_utils.JOB_RETENTION_DAYS + 1) * 24 * 3600
+    os.utime(job_dir, (old_timestamp, old_timestamp))
+
+    def fail_rmtree(_path):
+        raise OSError("disk error")
+
+    monkeypatch.setattr(tool_utils, "JOB_FOLDER", str(tmp_path))
+    monkeypatch.setattr(tool_utils.shutil, "rmtree", fail_rmtree)
+
+    assert tool_utils.clean_old_jobs() == []
+    assert job_dir.is_dir()
 
 
 @pytest.mark.asyncio
@@ -481,6 +644,18 @@ def test_openapi_job_routes_document_error_responses():
     detail_schema = openapi["paths"]["/api/jobs/status/{job_id}"]["get"]["responses"]["404"]["content"]["application/json"]["schema"]
     assert detail_schema["required"] == ["detail"]
     assert detail_schema["properties"]["detail"]["type"] == "string"
+
+
+def test_openapi_stream_and_health_error_content_types():
+    openapi = app.openapi()
+    stream_response = openapi["paths"]["/api/jobs/logs/{job_id}"]["get"]["responses"]["200"]
+    health_response = openapi["paths"]["/health"]["get"]["responses"]["503"]
+
+    assert set(stream_response["content"]) == {"text/event-stream"}
+    assert stream_response["content"]["text/event-stream"]["schema"] == {"type": "string"}
+    assert health_response["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/HealthResponse"
+    }
 
 
 def test_openapi_info_version_matches_pyproject():
@@ -538,18 +713,38 @@ async def test_get_results_for_pending_job(client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_cancel_pending_job_marks_it_cancelled_and_removes_submission(client: httpx.AsyncClient, tmp_path):
+async def test_cancel_pending_job_marks_it_cancelled_and_removes_submission(
+    client: httpx.AsyncClient,
+    monkeypatch,
+    tmp_path,
+):
     job_id = "cancel-pending-test"
     job_name = "cancel_pending_test"
+
+    class _Gauge:
+        def __init__(self):
+            self.value = 0
+
+        def set(self, value):
+            self.value = value
+
+    queued_jobs = _Gauge()
+    monkeypatch.setattr(job_queue, "_queue", asyncio.Queue())
+    monkeypatch.setattr(job_queue, "_cancelled_job_ids", set())
+    monkeypatch.setattr(job_queue, "_claimed_job_ids", set())
+    monkeypatch.setattr(job_queue, "_queued_job_ids", set())
+    monkeypatch.setattr(job_processor.metrics, "queued_jobs", queued_jobs)
     await state.set_initial_status(job_id, job_name, str(tmp_path))
     await state.add_submitted_job(job_name)
-
+    await job_queue.add_job({"job_id": job_id, "jobname": job_name, "script_path": str(tmp_path / "script.py")})
     response = await client.post(f"/api/jobs/{job_id}/cancel")
 
     assert response.status_code == 200
     assert response.json() == {"job_id": job_id, "status": "CANCELLED"}
     assert await state.get_job_status(job_id) == "CANCELLED"
     assert not await state.is_job_submitted(job_name)
+    assert job_queue.qsize() == 0
+    assert queued_jobs.value == 0
     assert job_processor.job_queue.consume_cancellation(job_id)
 
 
@@ -627,6 +822,23 @@ async def test_stream_job_logs_replays_completed_job_output(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_stream_job_logs_chunks_large_terminal_backlog(tmp_path):
+    job_id = "chunked-log-stream"
+    content = "x" * (jobs_api.LOG_STREAM_CHUNK_CHARS * 2 + 17)
+    await state.set_initial_status(job_id, "chunked_logs", str(tmp_path))
+    (tmp_path / "stdout.log").write_text(content, encoding="utf-8")
+    await state.update_job_status(job_id, JobStatus.COMPLETED, {"ok": True})
+
+    stream = jobs_api._stream_job_logs(job_id, str(tmp_path))
+    events = [event async for event in stream]
+    payloads = [json.loads(event.split("data: ", maxsplit=1)[1]) for event in events]
+
+    assert len(payloads) == 3
+    assert all(len(payload) <= jobs_api.LOG_STREAM_CHUNK_CHARS for payload in payloads)
+    assert "".join(payloads) == content
+
+
+@pytest.mark.asyncio
 async def test_stream_job_logs_waits_for_cancelled_process_output_drain(tmp_path):
     job_id = "cancelled-stream-tail"
     await state.set_initial_status(job_id, "cancelled_stream_tail", str(tmp_path))
@@ -681,8 +893,11 @@ async def test_worker_skips_cancelled_queued_job_without_releasing_resubmitted_n
     queue_items = iter((job, None))
     dispatched = []
     task_done_calls = []
+    monkeypatch.setattr(job_queue, "_queued_job_ids", {job["job_id"]})
+    monkeypatch.setattr(job_queue, "_cancelled_job_ids", set())
+    monkeypatch.setattr(job_queue, "_claimed_job_ids", set())
     await state.add_submitted_job(job["jobname"])
-    job_processor.job_queue.cancel_job(job["job_id"])
+    assert job_processor.job_queue.cancel_job(job["job_id"])
     await state.remove_submitted_job(job["jobname"])
     assert await state.add_submitted_job(job["jobname"])
 
@@ -704,9 +919,47 @@ async def test_worker_skips_cancelled_queued_job_without_releasing_resubmitted_n
 
 
 @pytest.mark.asyncio
-async def test_cancel_claimed_pending_job_cancels_registered_dispatch_task(client: httpx.AsyncClient, tmp_path):
+async def test_worker_claim_updates_logical_queue_metric(monkeypatch):
+    job = {"job_id": "metric-dequeue", "jobname": "metric_dequeue", "script_path": "/tmp/script.py"}
+    observed = []
+
+    class _Gauge:
+        def __init__(self):
+            self.value = 0
+
+        def set(self, value):
+            self.value = value
+
+    queued_jobs = _Gauge()
+    monkeypatch.setattr(job_queue, "_queue", asyncio.Queue())
+    monkeypatch.setattr(job_queue, "_queued_job_ids", set())
+    monkeypatch.setattr(job_queue, "_cancelled_job_ids", set())
+    monkeypatch.setattr(job_queue, "_claimed_job_ids", set())
+    monkeypatch.setattr(job_processor.metrics, "queued_jobs", queued_jobs)
+
+    async def capture_dispatch(_job):
+        observed.append((job_queue.qsize(), queued_jobs.value))
+
+    monkeypatch.setattr(job_processor, "_dispatch_job", capture_dispatch)
+    await job_queue.add_job(job)
+    await job_queue.put_shutdown_signal(1)
+
+    await job_processor._worker()
+
+    assert observed == [(0, 0)]
+
+
+@pytest.mark.asyncio
+async def test_cancel_claimed_pending_job_cancels_registered_dispatch_task(
+    client: httpx.AsyncClient,
+    monkeypatch,
+    tmp_path,
+):
     job_id = "claimed-pending-cancel"
     job_name = "claimed_pending_cancel"
+    monkeypatch.setattr(job_queue, "_queued_job_ids", {job_id})
+    monkeypatch.setattr(job_queue, "_cancelled_job_ids", set())
+    monkeypatch.setattr(job_queue, "_claimed_job_ids", set())
     await state.set_initial_status(job_id, job_name, str(tmp_path))
     assert job_queue.claim_job(job_id)
 
@@ -755,6 +1008,28 @@ async def test_get_completed_results_lists_downloadable_files(client: httpx.Asyn
     download_response = await client.get(f"/api/jobs/download/{job_id}/output.txt")
     assert download_response.status_code == 200
     assert download_response.content == b"crawl output"
+
+
+@pytest.mark.asyncio
+async def test_result_file_listing_does_not_block_event_loop(monkeypatch, tmp_path):
+    job_id = "slow-listing-test"
+    await state.set_initial_status(job_id, "slow_listing", str(tmp_path))
+    await state.update_job_status(job_id, JobStatus.COMPLETED, result={"ok": True})
+    original_listdir = jobs_api.os.listdir
+
+    def slow_listdir(path):
+        time.sleep(0.1)
+        return original_listdir(path)
+
+    monkeypatch.setattr(jobs_api.os, "listdir", slow_listdir)
+
+    started = time.perf_counter()
+    result_task = asyncio.create_task(jobs_api.get_job_results_endpoint(job_id))
+    await asyncio.sleep(0.01)
+    heartbeat_elapsed = time.perf_counter() - started
+    await result_task
+
+    assert heartbeat_elapsed < 0.05
 
 
 @pytest.mark.asyncio
@@ -1086,6 +1361,19 @@ async def test_stop_workers_cancels_workers_after_queue_timeout(monkeypatch):
 
     assert worker.cancelled()
     assert job_processor._workers == []
+
+
+def test_systemd_deploy_serializes_production_updates():
+    workflow = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "systemd-deploy.yaml"
+    service = Path(__file__).resolve().parents[1] / "example" / "playwright-multi-crawler.service"
+    content = workflow.read_text(encoding="utf-8")
+    service_content = service.read_text(encoding="utf-8")
+
+    assert "concurrency:" in content
+    assert "group: playwright-multi-crawler-production" in content
+    assert "cancel-in-progress: false" in content
+    assert "KillMode=mixed" in content
+    assert "KillMode=mixed" in service_content
 
 @pytest.mark.asyncio
 async def test_submit_additional_file_accepts_safe_filename(client: httpx.AsyncClient):

@@ -17,7 +17,12 @@ logger = logging.getLogger(__name__)
 @router.get(
     "",
     response_model=HealthResponse,
-    responses={503: {"description": "Browser or worker pool is unavailable"}},
+    responses={
+        503: {
+            "model": HealthResponse,
+            "description": "Browser or worker pool is unavailable",
+        }
+    },
 )
 async def health_check_endpoint(request: Request, response: Response):
     """애플리케이션 상태 확인"""

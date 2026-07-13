@@ -4,7 +4,7 @@ import os
 import shutil
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import AbstractSet, Optional
 from pyvirtualdisplay import Display
 
 from src.config import JOB_FOLDER, JOB_RETENTION_DAYS, CLEANUP_INTERVAL_HOURS
@@ -48,7 +48,7 @@ def stop_display():
             logging.error(f"Failed to stop virtual display: {e}")
         _display = None # 종료 후 None으로 설정
 
-def clean_old_jobs() -> list[str]:
+def clean_old_jobs(excluded_job_ids: AbstractSet[str] = frozenset()) -> list[str]:
     """Delete old job folders and return their IDs for event-loop state cleanup."""
     cutoff = datetime.now() - timedelta(days=JOB_RETENTION_DAYS)
     logging.info(f"Running cleanup for jobs older than {cutoff.isoformat()} in {JOB_FOLDER}")
@@ -60,13 +60,15 @@ def clean_old_jobs() -> list[str]:
     deleted_job_ids = []
     try:
         for item_name in os.listdir(JOB_FOLDER):
+            if item_name in excluded_job_ids:
+                continue
             item_path = os.path.join(JOB_FOLDER, item_name)
             try:
                 if os.path.isdir(item_path): 
                     mod_time = datetime.fromtimestamp(os.path.getmtime(item_path))
                     if mod_time < cutoff:
                         logging.info(f"Deleting old job folder: {item_path} (modified: {mod_time})")
-                        shutil.rmtree(item_path, ignore_errors=True)
+                        shutil.rmtree(item_path)
                         deleted_job_ids.append(item_name)
             except FileNotFoundError:
                  logging.warning(f"File not found during cleanup scan: {item_path}")
@@ -85,7 +87,8 @@ async def periodic_cleanup():
     logging.info("Periodic cleanup task started.")
     while True:
         try:
-            deleted_job_ids = await asyncio.to_thread(clean_old_jobs)
+            active_job_ids = await state.get_active_job_ids()
+            deleted_job_ids = await asyncio.to_thread(clean_old_jobs, active_job_ids)
             for job_id in deleted_job_ids:
                 await state.remove_job_state(job_id)
         except Exception as e:

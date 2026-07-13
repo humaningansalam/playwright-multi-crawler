@@ -34,6 +34,7 @@ RESERVED_JOB_FILENAMES = {
 }
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 LOG_FILENAMES = ("stdout.log", "stderr.log")
+LOG_STREAM_CHUNK_CHARS = 64 * 1024
 ACTIVE_JOB_STATUSES = frozenset({JobStatus.PENDING, JobStatus.RUNNING})
 TERMINAL_JOB_STATUSES = frozenset({
     JobStatus.COMPLETED,
@@ -98,17 +99,78 @@ def _validate_additional_filenames(additional_files: List[UploadFile]) -> None:
         seen_filenames.add(filename)
 
 
+async def _run_file_operation(function, *args):
+    operation = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError as cancellation:
+        try:
+            await operation
+        except Exception:
+            logging.exception("File operation failed while request cancellation was pending.")
+        raise cancellation
+
+
+async def _open_file(*args, **kwargs):
+    operation = asyncio.create_task(asyncio.to_thread(open, *args, **kwargs))
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError as cancellation:
+        try:
+            opened_file = await operation
+        except Exception:
+            logging.exception("File open failed while request cancellation was pending.")
+        else:
+            try:
+                await asyncio.to_thread(opened_file.close)
+            except Exception:
+                logging.exception("Failed to close file opened during request cancellation.")
+        raise cancellation
+
+
 async def _save_upload_file(upload_file: UploadFile, destination: str) -> None:
-    with open(destination, "wb") as output_file:
+    output_file = await _open_file(destination, "wb")
+    try:
         while chunk := await upload_file.read(UPLOAD_CHUNK_BYTES):
-            output_file.write(chunk)
+            await _run_file_operation(output_file.write, chunk)
+    except BaseException:
+        try:
+            await _run_file_operation(output_file.close)
+        except Exception:
+            logging.exception("Failed to close upload file while another error was pending.")
+        raise
+    else:
+        await _run_file_operation(output_file.close)
+
+
+def _read_log_content(path: str, offset: int) -> tuple[str, int]:
+    with open(path, "r", encoding="utf-8", errors="replace") as log_file:
+        log_file.seek(offset)
+        return log_file.read(LOG_STREAM_CHUNK_CHARS), log_file.tell()
+
+
+def _list_job_files(job_path: str, base_download_url: str) -> Optional[Dict[str, str]]:
+    if not os.path.isdir(job_path):
+        return None
+    return {
+        filename: f"{base_download_url}/{quote(filename, safe='')}"
+        for filename in os.listdir(job_path)
+        if os.path.isfile(os.path.join(job_path, filename))
+    }
+
+
+def _remove_job_path(job_path: str) -> None:
+    if os.path.exists(job_path):
+        shutil.rmtree(job_path)
 
 
 async def _rollback_job_submission(jobname: str, job_id: str, job_path: str) -> None:
     await state.remove_submitted_job(jobname)
     await state.remove_job_state(job_id)
-    if os.path.exists(job_path):
-        shutil.rmtree(job_path, ignore_errors=True)
+    try:
+        await _run_file_operation(_remove_job_path, job_path)
+    except OSError:
+        logging.exception("Failed to remove partial job directory %s during rollback.", job_path)
 
 
 @router.post(
@@ -206,7 +268,6 @@ async def submit_job_endpoint(
         raise
     
     metrics.jobs_submitted.inc()
-    metrics.queued_jobs.set(job_queue.qsize())
     
     logging.info(f"Job '{jobname}' (ID: {job_id}) successfully queued.")
     return JobSubmitResponse(job_id=job_id)
@@ -285,16 +346,14 @@ async def get_job_results_endpoint(job_id: str):
         job_path = job_info.get('job_path')
         files: Optional[Dict[str, str]] = None 
 
-        if job_path and os.path.isdir(job_path):
+        if job_path:
             try:
-                # 파일 목록 생성 (다운로드 URL 포함)
-                # API 경로 접두사를 고려하여 URL 생성
                 base_download_url = f"{router.prefix}/download/{job_id}"
-                files = {
-                    filename: f"{base_download_url}/{quote(filename, safe='')}"
-                    for filename in os.listdir(job_path)
-                    if os.path.isfile(os.path.join(job_path, filename))
-                }
+                files = await _run_file_operation(
+                    _list_job_files,
+                    job_path,
+                    base_download_url,
+                )
             except OSError as e:
                 logging.error(f"Error listing files for job {job_id} in {job_path}: {e}")
                 files = {"error": f"Could not list result files: {e}"} 
@@ -317,29 +376,45 @@ async def get_job_results_endpoint(job_id: str):
 async def _stream_job_logs(job_id: str, job_path: str):
     offsets = {filename: 0 for filename in LOG_FILENAMES}
     while True:
+        backlog_remaining = False
         for filename in LOG_FILENAMES:
             log_path = os.path.join(job_path, filename)
             try:
-                with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
-                    log_file.seek(offsets[filename])
-                    content = log_file.read()
-                    offsets[filename] = log_file.tell()
+                content, offsets[filename] = await _run_file_operation(
+                    _read_log_content,
+                    log_path,
+                    offsets[filename],
+                )
             except FileNotFoundError:
                 continue
 
             if content:
                 event_name = filename.removesuffix(".log")
                 yield f"event: {event_name}\ndata: {json.dumps(content)}\n\n"
+                backlog_remaining = backlog_remaining or len(content) == LOG_STREAM_CHUNK_CHARS
 
         job_status = await state.get_job_status(job_id)
-        if job_status in TERMINAL_JOB_STATUSES and not job_processor.is_job_running(job_id):
+        if (
+            job_status in TERMINAL_JOB_STATUSES
+            and not job_processor.is_job_running(job_id)
+            and not backlog_remaining
+        ):
             return
+        if backlog_remaining:
+            continue
         await asyncio.sleep(0.1)
 
 
 @router.get(
     "/logs/{job_id}",
-    responses={404: _error_response("Job not found")},
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Live stdout and stderr events",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        },
+        404: _error_response("Job not found"),
+    },
 )
 async def stream_job_logs_endpoint(job_id: str):
     job_info = await state.get_job_info(job_id)

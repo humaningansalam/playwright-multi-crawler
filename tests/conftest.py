@@ -17,7 +17,8 @@ os.environ.setdefault("RUN_HEAVY_STARTUP", "false")
 os.environ.setdefault("PYTHONPATH", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.config import JOB_FOLDER
-from src.core import state_manager
+from src.common.metrics import metrics
+from src.core import job_queue, state_manager
 
 
 @pytest.fixture(autouse=True)
@@ -59,19 +60,29 @@ async def cleanup_job_state_and_folder():
     각 테스트 함수 실행 *전후*에 상태와 작업 폴더를 정리하는 픽스처입니다.
     autouse=True 이므로 모든 테스트 함수에 자동으로 적용됩니다.
     """
-    async with state_manager._job_status_lock:
-        state_manager._job_status_and_results.clear()
-    async with state_manager._submitted_jobs_lock:
-        state_manager._submitted_jobs.clear()
-    if os.path.exists(JOB_FOLDER):
-        for item in os.listdir(JOB_FOLDER):
-            item_path = os.path.join(JOB_FOLDER, item)
-            try:
-                if os.path.isdir(item_path):
-                    shutil.rmtree(item_path)
-                elif os.path.isfile(item_path):
-                    os.unlink(item_path)
-            except Exception as e:
-                print(f"Warning: Error cleaning up {item_path}: {e}")
+    async def reset_test_state():
+        async with state_manager._job_status_lock:
+            state_manager._job_status_and_results.clear()
+        async with state_manager._submitted_jobs_lock:
+            state_manager._submitted_jobs.clear()
 
+        job_queue._queue = asyncio.Queue()
+        job_queue._cancelled_job_ids.clear()
+        job_queue._claimed_job_ids.clear()
+        job_queue._queued_job_ids.clear()
+        metrics.queued_jobs.set(0)
+
+        if os.path.exists(JOB_FOLDER):
+            for item in os.listdir(JOB_FOLDER):
+                item_path = os.path.join(JOB_FOLDER, item)
+                try:
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    elif os.path.isfile(item_path):
+                        os.unlink(item_path)
+                except Exception as e:
+                    print(f"Warning: Error cleaning up {item_path}: {e}")
+
+    await reset_test_state()
     yield
+    await reset_test_state()

@@ -27,6 +27,17 @@ async def get_job_status(job_id: str) -> Optional[str]:
         job_info = _job_status_and_results.get(job_id)
         return job_info['status'] if job_info else None
 
+
+async def get_active_job_ids() -> Set[str]:
+    """Return job IDs that retention cleanup must preserve."""
+    active_statuses = {JobStatus.PENDING, JobStatus.RUNNING}
+    async with _job_status_lock:
+        return {
+            job_id
+            for job_id, job_info in _job_status_and_results.items()
+            if job_info.get('status') in active_statuses
+        }
+
 async def set_initial_status(job_id: str, job_name: str, job_path: str):
     """작업 상태 초기화 (PENDING)"""
     async with _job_status_lock:

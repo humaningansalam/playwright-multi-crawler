@@ -38,27 +38,73 @@ def _build_fallback_result(stdout: str, stderr: str, error: str, timeout_seconds
     return result
 
 
+async def _run_file_operation(function, *args):
+    operation = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError as cancellation:
+        try:
+            await operation
+        except Exception:
+            logging.exception("File operation failed while job cancellation was pending.")
+        raise cancellation
+
+
+async def _open_file(*args, **kwargs):
+    operation = asyncio.create_task(asyncio.to_thread(open, *args, **kwargs))
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError as cancellation:
+        try:
+            opened_file = await operation
+        except Exception:
+            logging.exception("File open failed while job cancellation was pending.")
+        else:
+            try:
+                await asyncio.to_thread(opened_file.close)
+            except Exception:
+                logging.exception("Failed to close file opened during job cancellation.")
+        raise cancellation
+
+
+def _load_result_file(result_path: str) -> Dict[str, Any]:
+    with open(result_path, "r", encoding="utf-8") as result_file:
+        return json.load(result_file)
+
+
 async def _read_result_file(job_path: str) -> Optional[Dict[str, Any]]:
     result_path = os.path.join(job_path, RESULT_FILENAME)
     if not os.path.exists(result_path):
         return None
     try:
-        with open(result_path, "r", encoding="utf-8") as result_file:
-            return json.load(result_file)
+        return await _run_file_operation(_load_result_file, result_path)
     except Exception as e:
         logging.error(f"Failed to read {RESULT_FILENAME} in {job_path}: {e}")
         return None
 
 
+def _write_log_chunk(log_file, chunk: bytes) -> None:
+    log_file.write(chunk)
+    log_file.flush()
+
+
 async def _stream_output_to_log(stream: asyncio.StreamReader, path: str) -> str:
     tail = bytearray()
-    with open(path, "wb") as log_file:
+    log_file = await _open_file(path, "wb")
+    try:
         while chunk := await stream.read(LOG_READ_CHUNK_BYTES):
-            log_file.write(chunk)
-            log_file.flush()
+            await _run_file_operation(_write_log_chunk, log_file, chunk)
             tail.extend(chunk)
             if len(tail) > LOG_TAIL_BYTES:
                 del tail[:-LOG_TAIL_BYTES]
+    except BaseException:
+        try:
+            await _run_file_operation(log_file.close)
+        except Exception:
+            logging.exception("Failed to close job log while another error was pending.")
+        raise
+    else:
+        await _run_file_operation(log_file.close)
     return tail.decode("utf-8", errors="replace").strip()
 
 
@@ -195,7 +241,15 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
             if output_json is not None:
                 result_data["worker_result"] = output_json.get("result")
                 result_data["worker_error"] = output_json.get("error")
+        elif proc.returncode not in (None, 0):
+            final_status = JobStatus.FAILED
+            result_data = _build_fallback_result(
+                stdout_decoded,
+                stderr_decoded,
+                f"Worker exited with code {proc.returncode}",
+            )
         elif output_json is None:
+            final_status = JobStatus.FAILED
             result_data = _build_fallback_result(
                 stdout_decoded,
                 stderr_decoded,
@@ -208,11 +262,6 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
 
             if final_status == JobStatus.FAILED:
                 result_data = error_info
-
-        if final_status == JobStatus.COMPLETED:
-            metrics.jobs_completed.inc()
-        else:
-            metrics.jobs_failed.inc()
 
     except asyncio.CancelledError:
         if proc is not None:
@@ -236,11 +285,15 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     
     finally:
         metrics.active_jobs.dec()
-        metrics.queued_jobs.set(job_queue.qsize())
 
         end_time = time.time()
         duration = end_time - start_time
         logging.info(f"Job '{jobname}' (ID: {job_id}) finished with status {final_status} in {duration:.2f}s")
+
+        if final_status == JobStatus.COMPLETED:
+            metrics.jobs_completed.inc()
+        elif final_status == JobStatus.FAILED:
+            metrics.jobs_failed.inc()
 
         await state.update_job_status(job_id, final_status, result_data, duration, logs)
         await state.remove_submitted_job(jobname)

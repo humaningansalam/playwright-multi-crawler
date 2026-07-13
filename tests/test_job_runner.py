@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import sys
+import time
 
 import pytest
 
@@ -101,6 +102,25 @@ async def test_job_runner_keeps_shared_browser_open_when_crawl_fails(monkeypatch
     assert browser.context.closed is True
     assert browser.close_called is False
     assert (Path(tmp_path) / job_runner.RESULT_FILENAME).exists()
+
+
+@pytest.mark.asyncio
+async def test_job_runner_records_system_exit_as_failed(monkeypatch, tmp_path):
+    script_path = tmp_path / "script.py"
+    script_path.write_text(
+        "async def crawl(page, context, job_path):\n"
+        "    raise SystemExit(7)\n",
+        encoding="utf-8",
+    )
+    browser = _FakeBrowser()
+    monkeypatch.setattr(job_runner, "async_playwright", lambda: _FakePlaywright(browser))
+
+    await job_runner.run_user_script("job-1", str(script_path), str(tmp_path))
+
+    result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
+    assert result["status"] == "FAILED"
+    assert result["error"]["error"] == "7"
+    assert "SystemExit: 7" in result["error"]["traceback"]
 
 
 @pytest.mark.asyncio
@@ -231,6 +251,103 @@ async def test_job_processor_streams_output_to_log_and_bounds_tail(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_job_processor_log_write_does_not_block_event_loop(monkeypatch):
+    stream = asyncio.StreamReader()
+    stream.feed_data(b"payload")
+    stream.feed_eof()
+
+    class _SlowFile:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def write(self, _chunk):
+            time.sleep(0.1)
+
+        def flush(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(job_processor, "open", lambda *_args, **_kwargs: _SlowFile(), raising=False)
+
+    started = time.perf_counter()
+    log_task = asyncio.create_task(job_processor._stream_output_to_log(stream, "unused"))
+    await asyncio.sleep(0.01)
+    heartbeat_elapsed = time.perf_counter() - started
+    await log_task
+
+    assert heartbeat_elapsed < 0.05
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow_stage", ["open", "close"])
+async def test_job_log_file_lifecycle_does_not_block_event_loop(monkeypatch, slow_stage):
+    stream = asyncio.StreamReader()
+    stream.feed_eof()
+
+    class _File:
+        def close(self):
+            if slow_stage == "close":
+                time.sleep(0.1)
+
+    def open_file(*_args, **_kwargs):
+        if slow_stage == "open":
+            time.sleep(0.1)
+        return _File()
+
+    monkeypatch.setattr(job_processor, "open", open_file, raising=False)
+
+    started = time.perf_counter()
+    log_task = asyncio.create_task(job_processor._stream_output_to_log(stream, "unused"))
+    await asyncio.sleep(0.01)
+    heartbeat_elapsed = time.perf_counter() - started
+    await log_task
+
+    assert heartbeat_elapsed < 0.05
+
+
+@pytest.mark.asyncio
+async def test_job_log_close_failure_does_not_replace_cancellation(monkeypatch):
+    read_started = asyncio.Event()
+
+    class _Stream:
+        async def read(self, _size):
+            read_started.set()
+            await asyncio.Event().wait()
+
+    class _File:
+        def close(self):
+            raise OSError("close failed")
+
+    monkeypatch.setattr(job_processor, "open", lambda *_args, **_kwargs: _File(), raising=False)
+
+    log_task = asyncio.create_task(job_processor._stream_output_to_log(_Stream(), "unused"))
+    await read_started.wait()
+    log_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await log_task
+
+
+@pytest.mark.asyncio
+async def test_job_file_operation_preserves_cancellation_after_disk_error():
+    def delayed_disk_error():
+        time.sleep(0.05)
+        raise OSError("disk failed")
+
+    operation = asyncio.create_task(job_processor._run_file_operation(delayed_disk_error))
+    await asyncio.sleep(0.01)
+    operation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+
+
+@pytest.mark.asyncio
 async def test_job_processor_reads_completed_result_file(tmp_path):
     expected = {"status": "COMPLETED", "result": {"items": ["one"]}, "error": None}
     (tmp_path / job_processor.RESULT_FILENAME).write_text(json.dumps(expected), encoding="utf-8")
@@ -238,6 +355,75 @@ async def test_job_processor_reads_completed_result_file(tmp_path):
     result = await job_processor._read_result_file(str(tmp_path))
 
     assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_job_processor_rejects_completed_result_from_nonzero_worker(monkeypatch, tmp_path):
+    script_path = tmp_path / "script.py"
+    script_path.write_text("# test script\n", encoding="utf-8")
+    state_updates = []
+
+    class _FailedProcess:
+        returncode = 7
+
+        async def communicate(self):
+            return b"", b"worker exited"
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return _FailedProcess()
+
+    async def fake_read_result_file(_job_path):
+        return {"status": "COMPLETED", "result": {"ok": True}, "error": None}
+
+    async def capture_state_update(*args, **kwargs):
+        state_updates.append((args, kwargs))
+
+    async def ignore_remove_submitted_job(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(job_processor, "_read_result_file", fake_read_result_file)
+    monkeypatch.setattr(job_processor.state, "update_job_status", capture_state_update)
+    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_remove_submitted_job)
+
+    await job_processor._process_job_internal(str(script_path), "nonzero-worker", "job-1")
+
+    final_update = state_updates[-1][0]
+    assert final_update[1] == job_processor.JobStatus.FAILED
+    assert final_update[2]["error"] == "Worker exited with code 7"
+
+
+@pytest.mark.asyncio
+async def test_job_processor_counts_system_failure(monkeypatch, tmp_path):
+    script_path = tmp_path / "script.py"
+    script_path.write_text("# test script\n", encoding="utf-8")
+
+    class _Counter:
+        def __init__(self):
+            self.value = 0
+
+        def inc(self):
+            self.value += 1
+
+    completed = _Counter()
+    failed = _Counter()
+
+    async def fail_create_subprocess_exec(*_args, **_kwargs):
+        raise OSError("spawn failed")
+
+    async def ignore_state_update(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(job_processor.metrics, "jobs_completed", completed)
+    monkeypatch.setattr(job_processor.metrics, "jobs_failed", failed)
+    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fail_create_subprocess_exec)
+    monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
+    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_state_update)
+
+    await job_processor._process_job_internal(str(script_path), "spawn-failure", "job-1")
+
+    assert completed.value == 0
+    assert failed.value == 1
 
 
 @pytest.mark.asyncio
