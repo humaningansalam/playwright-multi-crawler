@@ -277,6 +277,38 @@ async def test_upload_save_reads_bounded_chunks(tmp_path):
     assert destination.read_bytes() == b"firstsecond"
 
 
+@pytest.mark.asyncio
+async def test_submit_cancellation_rolls_back_reserved_name_and_job_folder(
+    monkeypatch,
+    tmp_path,
+):
+    class _CancelledUpload:
+        filename = "crawl.py"
+
+        def __init__(self):
+            self.closed = False
+
+        async def read(self, _size):
+            raise asyncio.CancelledError()
+
+        async def close(self):
+            self.closed = True
+
+    class _Request:
+        app = app
+
+    upload = _CancelledUpload()
+    job_name = "cancelled-upload"
+    monkeypatch.setattr(jobs_api, "JOB_FOLDER", str(tmp_path))
+
+    with pytest.raises(asyncio.CancelledError):
+        await jobs_api.submit_job_endpoint(_Request(), job_name, upload, [])
+
+    assert upload.closed is True
+    assert not await state.is_job_submitted(job_name)
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_browser_disconnect_requests_service_restart(monkeypatch):
     exit_codes = []
     monkeypatch.setattr(playwright_manager, "_exit_process", lambda code: exit_codes.append(code))

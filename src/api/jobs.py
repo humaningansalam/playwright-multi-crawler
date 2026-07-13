@@ -104,6 +104,13 @@ async def _save_upload_file(upload_file: UploadFile, destination: str) -> None:
             output_file.write(chunk)
 
 
+async def _rollback_job_submission(jobname: str, job_id: str, job_path: str) -> None:
+    await state.remove_submitted_job(jobname)
+    await state.remove_job_state(job_id)
+    if os.path.exists(job_path):
+        shutil.rmtree(job_path, ignore_errors=True)
+
+
 @router.post(
     "/submit",
     status_code=status.HTTP_202_ACCEPTED,
@@ -180,21 +187,23 @@ async def submit_job_endpoint(
             else:
                  logging.warning(f"Received additional file without filename for job {job_id}. Skipping.")
 
-    except Exception as e:
-         # 파일 저장 중 에러 발생 시 롤백
-         await state.remove_submitted_job(jobname) 
-         if os.path.exists(job_path):
-             shutil.rmtree(job_path, ignore_errors=True) 
-         logging.error(f"Failed during file saving process for job '{jobname}' (ID: {job_id}): {e}")
-         if not isinstance(e, HTTPException):
-              raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to process job submission: {e}")
-         else:
-              raise e
+        await state.set_initial_status(job_id, jobname, job_path)
+        job_data = {'script_path': script_path, 'jobname': jobname, 'job_id': job_id}
+        await job_queue.add_job(job_data)
 
-    # 작업 상태 초기화 및 큐 추가
-    await state.set_initial_status(job_id, jobname, job_path)
-    job_data = {'script_path': script_path, 'jobname': jobname, 'job_id': job_id}
-    await job_queue.add_job(job_data)
+    except asyncio.CancelledError:
+        await _rollback_job_submission(jobname, job_id, job_path)
+        logging.info(f"Cancelled job submission '{jobname}' (ID: {job_id}); rolled back partial state.")
+        raise
+    except Exception as e:
+        await _rollback_job_submission(jobname, job_id, job_path)
+        logging.error(f"Failed during job submission setup for '{jobname}' (ID: {job_id}): {e}")
+        if not isinstance(e, HTTPException):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to process job submission: {e}",
+            ) from e
+        raise
     
     metrics.jobs_submitted.inc()
     metrics.queued_jobs.set(job_queue.qsize())
