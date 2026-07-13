@@ -351,6 +351,62 @@ async def test_job_processor_terminates_process_group_when_cancelled(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_job_processor_finalizes_when_cancelled_during_running_transition(
+    monkeypatch,
+    tmp_path,
+):
+    script_path = tmp_path / "script.py"
+    script_path.write_text("# test script\n", encoding="utf-8")
+    running_update_started = asyncio.Event()
+    state_updates = []
+    removed_job_names = []
+
+    class _FakeGauge:
+        def __init__(self):
+            self.value = 0
+
+        def inc(self):
+            self.value += 1
+
+        def dec(self):
+            self.value -= 1
+
+        def set(self, _value):
+            pass
+
+    active_jobs = _FakeGauge()
+    queued_jobs = _FakeGauge()
+
+    async def block_running_update(_job_id, status, *args, **kwargs):
+        state_updates.append((status, args, kwargs))
+        if status == job_processor.JobStatus.RUNNING:
+            running_update_started.set()
+            await asyncio.Event().wait()
+
+    async def capture_removed_job(job_name):
+        removed_job_names.append(job_name)
+
+    monkeypatch.setattr(job_processor.metrics, "active_jobs", active_jobs)
+    monkeypatch.setattr(job_processor.metrics, "queued_jobs", queued_jobs)
+    monkeypatch.setattr(job_processor.state, "update_job_status", block_running_update)
+    monkeypatch.setattr(job_processor.state, "remove_submitted_job", capture_removed_job)
+
+    task = asyncio.create_task(
+        job_processor._process_job_internal(str(script_path), "cancel-transition", "job-1")
+    )
+    await running_update_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert active_jobs.value == 0
+    assert state_updates[-1][0] == job_processor.JobStatus.CANCELLED
+    assert state_updates[-1][1][0] == {"error": "cancelled"}
+    assert removed_job_names == ["cancel-transition"]
+
+
+@pytest.mark.asyncio
 async def test_job_processor_retains_log_tails_when_cancelled(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text("# test script\n", encoding="utf-8")

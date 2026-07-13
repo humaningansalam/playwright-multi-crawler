@@ -116,8 +116,6 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     start_time = time.time()
     logging.info(f"Starting job '{jobname}' (ID: {job_id}) via subprocess")
     
-    await state.update_job_status(job_id, JobStatus.RUNNING)
-    
     job_path = os.path.dirname(script_path)
     
     # 실행할 명령어: python src/core/job_runner.py <id> <script> <path>
@@ -140,6 +138,8 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
     stderr_task: Optional[asyncio.Task] = None
 
     try:
+        await state.update_job_status(job_id, JobStatus.RUNNING)
+
         # 서브프로세스 실행 (비동기)
         subprocess_options = {
             "cwd": job_path,
