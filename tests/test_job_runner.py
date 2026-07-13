@@ -241,6 +241,31 @@ async def test_job_processor_reads_completed_result_file(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_job_propagates_worker_cancellation(monkeypatch):
+    process_started = asyncio.Event()
+    job = {
+        "script_path": "/tmp/script.py",
+        "jobname": "shutdown-cancel",
+        "job_id": "job-1",
+    }
+
+    async def block_process(*_args, **_kwargs):
+        process_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(job_processor, "_process_job_internal", block_process)
+
+    dispatch_task = asyncio.create_task(job_processor._dispatch_job(job))
+    await process_started.wait()
+    dispatch_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch_task
+
+    assert job["job_id"] not in job_processor._running_job_tasks
+
+
+@pytest.mark.asyncio
 async def test_job_processor_terminates_process_group(monkeypatch):
     signals = []
 

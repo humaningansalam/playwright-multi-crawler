@@ -262,6 +262,9 @@ async def _dispatch_job(job: Dict[str, Any]):
         await process_task
     except asyncio.CancelledError:
         logging.info(f"Job '{jobname}' (ID: {job_id}) was cancelled.")
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
+            raise
     except Exception as e:
         logging.error(f"Critical dispatch error for job '{jobname}': {e}")
         await state.update_job_status(job_id, JobStatus.FAILED, {'error': str(e)})
