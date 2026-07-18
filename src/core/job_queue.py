@@ -1,24 +1,26 @@
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from src.common.metrics import metrics
+from src.models.job import QueuedJob
 
-_queue = asyncio.Queue()
-_cancelled_job_ids = set()
-_claimed_job_ids = set()
-_queued_job_ids = set()
+_queue: asyncio.Queue[Optional[QueuedJob]] = asyncio.Queue()
+_cancelled_job_ids: set[str] = set()
+_claimed_job_ids: set[str] = set()
+_queued_job_ids: set[str] = set()
 
-async def add_job(job_data: Dict[str, Any]):
-    """작업 큐에 작업 추가"""
-    await _queue.put(job_data)
-    _queued_job_ids.add(job_data["job_id"])
+
+async def add_job(job: QueuedJob) -> None:
+    if not isinstance(job, QueuedJob):
+        raise TypeError("job must be a QueuedJob")
+    await _queue.put(job)
+    _queued_job_ids.add(job.job_id)
     metrics.queued_jobs.set(qsize())
-    logging.debug(f"Job {job_data.get('job_id', '')} added to queue.")
+    logging.debug("Job %s added to queue.", job.job_id)
 
 
 def cancel_job(job_id: str) -> bool:
-    """Mark an unclaimed queued job for cancellation."""
     if job_id in _claimed_job_ids or job_id not in _queued_job_ids:
         return False
     _cancelled_job_ids.add(job_id)
@@ -35,7 +37,6 @@ def consume_cancellation(job_id: str) -> bool:
 
 
 def claim_job(job_id: str) -> bool:
-    """Atomically consume a queued cancellation mark or claim the job for dispatch."""
     if consume_cancellation(job_id):
         return False
     _queued_job_ids.discard(job_id)
@@ -47,38 +48,29 @@ def claim_job(job_id: str) -> bool:
 def release_job(job_id: str) -> None:
     _claimed_job_ids.discard(job_id)
 
-async def get_job() -> Optional[Dict[str, Any]]:
-    """큐에서 작업 가져오기 """
+
+async def get_job() -> Optional[QueuedJob]:
     job = await _queue.get()
-    if job is None:
-        logging.debug("Shutdown signal received from queue.")
-    else:
-        logging.debug(f"Job {job.get('job_id', '')} retrieved from queue.")
+    logging.debug("%s received from queue.", "Shutdown signal" if job is None else f"Job {job.job_id}")
     return job
 
-def task_done():
-    """큐의 작업 완료 알림"""
-    try:
-        _queue.task_done()
-    except ValueError:
-        logging.debug("task_done() called when queue count is already zero.")
+
+def task_done() -> None:
+    _queue.task_done()
 
 
-async def join(timeout: Optional[float] = None):
-    """큐의 모든 작업이 완료될 때까지 대기"""
-    logging.info(f"Waiting for queue to join (timeout: {timeout}s)...")
-    if timeout:
+async def join(timeout: Optional[float] = None) -> None:
+    logging.info("Waiting for queue to join (timeout: %ss)...", timeout)
+    if timeout is not None:
         await asyncio.wait_for(_queue.join(), timeout=timeout)
     else:
         await _queue.join()
-    logging.info("Queue joined.")
 
-async def put_shutdown_signal(num_signals: int):
-    """워커 수만큼 종료 신호를 큐에 넣음"""
+
+async def put_shutdown_signal(num_signals: int) -> None:
     for _ in range(num_signals):
         await _queue.put(None)
-    logging.debug(f"Put {num_signals} shutdown signals into queue.")
+
 
 def qsize() -> int:
-    """현재 큐에 있는 항목 수 반환"""
     return len(_queued_job_ids)

@@ -10,6 +10,15 @@ import pytest
 
 from src.worker import job_runner
 from src.worker import job_processor
+from src.models.job import JobError, JobErrorCode, QueuedJob, WorkerCompleted
+
+
+def _stream(data: bytes = b"") -> asyncio.StreamReader:
+    stream = asyncio.StreamReader()
+    if data:
+        stream.feed_data(data)
+    stream.feed_eof()
+    return stream
 
 
 class _FakePage:
@@ -119,7 +128,8 @@ async def test_job_runner_records_system_exit_as_failed(monkeypatch, tmp_path):
 
     result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
     assert result["status"] == "FAILED"
-    assert result["error"]["error"] == "7"
+    assert result["error"]["code"] == JobErrorCode.WORKER_EXECUTION_FAILED
+    assert result["error"]["message"] == "7"
     assert "SystemExit: 7" in result["error"]["traceback"]
 
 
@@ -143,10 +153,10 @@ async def test_job_runner_writes_result_when_page_cleanup_fails(monkeypatch, tmp
 
     result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
     assert result["status"] == "FAILED"
-    assert result["error"] == {
-        "error": "Browser cleanup failed",
-        "cleanup_errors": [{"resource": "page", "error": "page close failed"}],
-    }
+    assert result["error"]["code"] == JobErrorCode.BROWSER_CLEANUP_FAILED
+    assert result["error"]["cleanup_failures"] == [
+        {"resource": "page", "message": "page close failed"}
+    ]
     assert browser.context.closed is True
 
 
@@ -170,10 +180,10 @@ async def test_job_runner_writes_result_when_context_cleanup_fails(monkeypatch, 
 
     result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
     assert result["status"] == "FAILED"
-    assert result["error"] == {
-        "error": "Browser cleanup failed",
-        "cleanup_errors": [{"resource": "context", "error": "context close failed"}],
-    }
+    assert result["error"]["code"] == JobErrorCode.BROWSER_CLEANUP_FAILED
+    assert result["error"]["cleanup_failures"] == [
+        {"resource": "context", "message": "context close failed"}
+    ]
     assert browser.context.page.closed is True
 
 
@@ -203,37 +213,199 @@ async def test_job_runner_imports_helper_from_job_directory(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_job_processor_runs_subprocess_in_job_directory(monkeypatch, tmp_path):
+async def test_job_runner_preserves_user_data_named_error(monkeypatch, tmp_path):
+    script_path = tmp_path / "script.py"
+    script_path.write_text(
+        "async def crawl(page, context, job_path):\n"
+        "    return {'error': 'this is user data'}\n",
+        encoding="utf-8",
+    )
+    browser = _FakeBrowser()
+    monkeypatch.setattr(job_runner, "async_playwright", lambda: _FakePlaywright(browser))
+
+    await job_runner.run_user_script("job-1", str(script_path), str(tmp_path))
+
+    result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
+    assert result == {
+        "status": "COMPLETED",
+        "result": {"error": "this is user data"},
+        "error": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_job_runner_rejects_non_json_result_without_leaving_temp_file(monkeypatch, tmp_path):
+    script_path = tmp_path / "script.py"
+    script_path.write_text(
+        "async def crawl(page, context, job_path):\n"
+        "    return object()\n",
+        encoding="utf-8",
+    )
+    browser = _FakeBrowser()
+    monkeypatch.setattr(job_runner, "async_playwright", lambda: _FakePlaywright(browser))
+
+    await job_runner.run_user_script("job-1", str(script_path), str(tmp_path))
+
+    result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
+    assert result["status"] == "FAILED"
+    assert result["error"]["code"] == JobErrorCode.WORKER_RESULT_INVALID
+    assert "JSON-serializable" in result["error"]["message"]
+    assert not (tmp_path / f"{job_runner.RESULT_FILENAME}.tmp").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result_expression",
+    [
+        "{'reading': float('nan')}",
+        "{1: 'integer', '1': 'string'}",
+    ],
+)
+async def test_job_runner_rejects_lossy_json_coercion(monkeypatch, tmp_path, result_expression):
+    script_path = tmp_path / "script.py"
+    script_path.write_text(
+        "async def crawl(page, context, job_path):\n"
+        f"    return {result_expression}\n",
+        encoding="utf-8",
+    )
+    browser = _FakeBrowser()
+    monkeypatch.setattr(job_runner, "async_playwright", lambda: _FakePlaywright(browser))
+
+    await job_runner.run_user_script("job-1", str(script_path), str(tmp_path))
+
+    result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
+    assert result["status"] == "FAILED"
+    assert result["error"]["code"] == JobErrorCode.WORKER_RESULT_INVALID
+
+
+@pytest.mark.asyncio
+async def test_job_runner_normalizes_tuple_result_to_json_array(monkeypatch, tmp_path):
+    script_path = tmp_path / "script.py"
+    script_path.write_text(
+        "async def crawl(page, context, job_path):\n"
+        "    return (1, {'ok': True})\n",
+        encoding="utf-8",
+    )
+    browser = _FakeBrowser()
+    monkeypatch.setattr(job_runner, "async_playwright", lambda: _FakePlaywright(browser))
+
+    await job_runner.run_user_script("job-1", str(script_path), str(tmp_path))
+
+    result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
+    assert result == {
+        "status": "COMPLETED",
+        "result": [1, {"ok": True}],
+        "error": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_job_processor_runs_unbuffered_subprocess_in_job_directory_and_cleans_group(
+    monkeypatch,
+    tmp_path,
+):
     script_path = tmp_path / "script.py"
     script_path.write_text("# test script\n", encoding="utf-8")
+    subprocess_args = ()
     subprocess_kwargs = {}
+    termination_calls = []
 
     class _FakeProcess:
         returncode = 0
 
-        async def communicate(self):
-            return b"", b""
+        def __init__(self):
+            self.stdout = _stream()
+            self.stderr = _stream()
 
-    async def fake_create_subprocess_exec(*_args, **kwargs):
+        async def wait(self):
+            return 0
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        nonlocal subprocess_args
+        subprocess_args = args
         subprocess_kwargs.update(kwargs)
         return _FakeProcess()
 
     async def fake_read_result_file(_job_path):
-        return {"status": "COMPLETED", "result": {"ok": True}, "error": None}
+        return job_processor.ResultFileRead(
+            job_processor.ResultFileState.LOADED,
+            WorkerCompleted(result={"ok": True}),
+        )
 
     async def ignore_state_update(*_args, **_kwargs):
         return None
 
+    async def fake_terminate(process, job_id, force=False):
+        termination_calls.append((process, job_id, force))
+
     monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(job_processor, "_read_result_file", fake_read_result_file)
+    monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
     monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_state_update)
 
     await job_processor._process_job_internal(str(script_path), "cwd-test", "job-1")
 
+    assert subprocess_args[:3] == (
+        sys.executable,
+        "-u",
+        job_processor.JOB_RUNNER_PATH,
+    )
     assert subprocess_kwargs["cwd"] == str(tmp_path)
     if os.name == "posix":
         assert subprocess_kwargs["start_new_session"] is True
+    assert len(termination_calls) == 1
+    assert termination_calls[0][1:] == ("job-1", True)
+
+
+@pytest.mark.asyncio
+async def test_job_processor_force_cleans_group_when_log_persistence_fails(
+    monkeypatch,
+    tmp_path,
+):
+    script_path = tmp_path / "script.py"
+    script_path.write_text("# test script\n", encoding="utf-8")
+    termination_calls = []
+    state_updates = []
+
+    class _FakeProcess:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = _stream()
+            self.stderr = _stream()
+
+        async def wait(self):
+            return 0
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return _FakeProcess()
+
+    async def fail_log_persistence(*_args, **_kwargs):
+        raise OSError("log disk failed")
+
+    async def fake_terminate(process, job_id, force=False):
+        termination_calls.append((process, job_id, force))
+
+    async def capture_state_update(*args, **kwargs):
+        state_updates.append((args, kwargs))
+
+    async def ignore_remove_submitted_job(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(job_processor, "_stream_output_to_log", fail_log_persistence)
+    monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
+    monkeypatch.setattr(job_processor.state, "update_job_status", capture_state_update)
+    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_remove_submitted_job)
+
+    await job_processor._process_job_internal(str(script_path), "log-failure", "job-1")
+
+    assert len(termination_calls) == 1
+    assert termination_calls[0][1:] == ("job-1", True)
+    final_update = state_updates[-1][0]
+    assert final_update[1] == job_processor.JobStatus.FAILED
+    assert final_update[2].code == JobErrorCode.PROCESSING_FAILED
 
 
 @pytest.mark.asyncio
@@ -248,6 +420,20 @@ async def test_job_processor_streams_output_to_log_and_bounds_tail(tmp_path):
     assert log_path.read_bytes().startswith(b"prefix-")
     assert log_path.stat().st_size == len(b"prefix-") + job_processor.LOG_TAIL_BYTES + 10
     assert len(tail.encode("utf-8")) == job_processor.LOG_TAIL_BYTES
+
+
+@pytest.mark.asyncio
+async def test_job_processor_log_tail_preserves_whitespace(tmp_path):
+    payload = b"  indented value  \n\n"
+    stream = asyncio.StreamReader()
+    stream.feed_data(payload)
+    stream.feed_eof()
+    log_path = tmp_path / job_processor.STDOUT_LOG_FILENAME
+
+    tail = await job_processor._stream_output_to_log(stream, str(log_path))
+
+    assert log_path.read_bytes() == payload
+    assert tail == payload.decode("utf-8")
 
 
 @pytest.mark.asyncio
@@ -354,7 +540,16 @@ async def test_job_processor_reads_completed_result_file(tmp_path):
 
     result = await job_processor._read_result_file(str(tmp_path))
 
-    assert result == expected
+    assert result.state == job_processor.ResultFileState.LOADED
+    assert result.result == WorkerCompleted(result={"items": ["one"]})
+
+
+@pytest.mark.asyncio
+async def test_job_processor_reports_missing_result_file(tmp_path):
+    result = await job_processor._read_result_file(str(tmp_path))
+
+    assert result.state == job_processor.ResultFileState.MISSING
+    assert result.result is None
 
 
 @pytest.mark.asyncio
@@ -362,18 +557,26 @@ async def test_job_processor_rejects_completed_result_from_nonzero_worker(monkey
     script_path = tmp_path / "script.py"
     script_path.write_text("# test script\n", encoding="utf-8")
     state_updates = []
+    termination_calls = []
 
     class _FailedProcess:
         returncode = 7
 
-        async def communicate(self):
-            return b"", b"worker exited"
+        def __init__(self):
+            self.stdout = _stream()
+            self.stderr = _stream(b"worker exited")
+
+        async def wait(self):
+            return 7
 
     async def fake_create_subprocess_exec(*_args, **_kwargs):
         return _FailedProcess()
 
     async def fake_read_result_file(_job_path):
-        return {"status": "COMPLETED", "result": {"ok": True}, "error": None}
+        return job_processor.ResultFileRead(
+            job_processor.ResultFileState.LOADED,
+            WorkerCompleted(result={"ok": True}),
+        )
 
     async def capture_state_update(*args, **kwargs):
         state_updates.append((args, kwargs))
@@ -381,8 +584,12 @@ async def test_job_processor_rejects_completed_result_from_nonzero_worker(monkey
     async def ignore_remove_submitted_job(*_args, **_kwargs):
         return None
 
+    async def fake_terminate(process, job_id, force=False):
+        termination_calls.append((process, job_id, force))
+
     monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(job_processor, "_read_result_file", fake_read_result_file)
+    monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", capture_state_update)
     monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_remove_submitted_job)
 
@@ -390,7 +597,10 @@ async def test_job_processor_rejects_completed_result_from_nonzero_worker(monkey
 
     final_update = state_updates[-1][0]
     assert final_update[1] == job_processor.JobStatus.FAILED
-    assert final_update[2]["error"] == "Worker exited with code 7"
+    assert final_update[2].code == JobErrorCode.WORKER_EXITED
+    assert final_update[2].exit_code == 7
+    assert len(termination_calls) == 1
+    assert termination_calls[0][1:] == ("job-1", True)
 
 
 @pytest.mark.asyncio
@@ -429,11 +639,11 @@ async def test_job_processor_counts_system_failure(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_dispatch_job_propagates_worker_cancellation(monkeypatch):
     process_started = asyncio.Event()
-    job = {
-        "script_path": "/tmp/script.py",
-        "jobname": "shutdown-cancel",
-        "job_id": "job-1",
-    }
+    job = QueuedJob(
+        script_path="/tmp/script.py",
+        jobname="shutdown-cancel",
+        job_id="job-1",
+    )
 
     async def block_process(*_args, **_kwargs):
         process_started.set()
@@ -448,7 +658,7 @@ async def test_dispatch_job_propagates_worker_cancellation(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await dispatch_task
 
-    assert job["job_id"] not in job_processor._running_job_tasks
+    assert job.job_id not in job_processor._running_job_tasks
 
 
 @pytest.mark.asyncio
@@ -525,14 +735,18 @@ async def test_job_processor_escalates_when_output_pipes_do_not_close(monkeypatc
 async def test_job_processor_terminates_process_group_when_cancelled(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text("# test script\n", encoding="utf-8")
-    communicate_started = asyncio.Event()
+    wait_started = asyncio.Event()
     terminated = []
 
     class _FakeProcess:
         returncode = None
 
-        async def communicate(self):
-            communicate_started.set()
+        def __init__(self):
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+
+        async def wait(self):
+            wait_started.set()
             await asyncio.Event().wait()
 
     process = _FakeProcess()
@@ -540,8 +754,10 @@ async def test_job_processor_terminates_process_group_when_cancelled(monkeypatch
     async def fake_create_subprocess_exec(*_args, **_kwargs):
         return process
 
-    async def fake_terminate(received_process, job_id):
-        terminated.append((received_process, job_id))
+    async def fake_terminate(received_process, job_id, force=False):
+        terminated.append((received_process, job_id, force))
+        received_process.stdout.feed_eof()
+        received_process.stderr.feed_eof()
 
     async def ignore_state_update(*_args, **_kwargs):
         return None
@@ -552,13 +768,16 @@ async def test_job_processor_terminates_process_group_when_cancelled(monkeypatch
     monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_state_update)
 
     task = asyncio.create_task(job_processor._process_job_internal(str(script_path), "cancel-test", "job-1"))
-    await communicate_started.wait()
+    await wait_started.wait()
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert terminated == [(process, "job-1")]
+    assert terminated == [
+        (process, "job-1", False),
+        (process, "job-1", True),
+    ]
 
 
 @pytest.mark.asyncio
@@ -613,7 +832,7 @@ async def test_job_processor_finalizes_when_cancelled_during_running_transition(
 
     assert active_jobs.value == 0
     assert state_updates[-1][0] == job_processor.JobStatus.CANCELLED
-    assert state_updates[-1][1][0] == {"error": "cancelled"}
+    assert state_updates[-1][1][0].code == JobErrorCode.JOB_CANCELLED
     assert removed_job_names == ["cancel-transition"]
 
 
@@ -644,7 +863,7 @@ async def test_job_processor_retains_log_tails_when_cancelled(monkeypatch, tmp_p
     async def fake_create_subprocess_exec(*_args, **_kwargs):
         return process
 
-    async def fake_terminate(_process, _job_id):
+    async def fake_terminate(_process, _job_id, force=False):
         return None
 
     async def capture_state_update(*args, **kwargs):
@@ -668,8 +887,8 @@ async def test_job_processor_retains_log_tails_when_cancelled(monkeypatch, tmp_p
     final_update = state_updates[-1]
     assert final_update[0][1] == job_processor.JobStatus.CANCELLED
     assert final_update[0][4] == {
-        "stdout": "stdout before cancel",
-        "stderr": "stderr before cancel",
+        "stdout": "stdout before cancel\n",
+        "stderr": "stderr before cancel\n",
     }
 
 

@@ -22,10 +22,11 @@ from src.core import job_queue, state_manager
 
 
 @pytest.fixture(autouse=True)
-def mark_test_app_workers_ready():
+def mark_test_app_workers_ready(monkeypatch):
     """API unit tests mock queue behavior and therefore opt into submission."""
     from src.main import app
 
+    monkeypatch.setattr("src.core.playwright_manager.is_browser_connected", lambda: True)
     app.state.job_submission_enabled = True
     yield
     app.state.job_submission_enabled = False

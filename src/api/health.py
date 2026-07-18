@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request, Response, status
 from src.core import playwright_manager
 from src.core import job_queue
 # models 임포트 
-from src.models.job import HealthResponse
+from src.models.job import HealthResponse, HealthStatus
 
 router = APIRouter(
     prefix="/health",
@@ -35,7 +35,7 @@ async def health_check_endpoint(request: Request, response: Response):
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
     return HealthResponse(
-        status="ok" if ready else "unavailable",
+        status=HealthStatus.OK if ready else HealthStatus.UNAVAILABLE,
         browser_connected=browser_connected,
         workers_ready=workers_ready,
         queued_tasks=queued_tasks

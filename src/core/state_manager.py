@@ -1,58 +1,58 @@
 import asyncio
-from datetime import datetime
 import logging
 from typing import Any, Dict, Optional, Set
-from src.models.job import JobStatus
 
-# --- 상태 변수 및 락 ---
-# 작업 상태 및 결과 저장 
-_job_status_and_results: Dict[str, Dict[str, Any]] = {}
-# 현재 큐 또는 실행 중인 작업 이름 추적용 
+from src.models.job import JobError, JobRecord, JobStatus
+
+
+class InvalidJobTransitionError(Exception):
+    def __init__(self, job_id: str, current: JobStatus, requested: JobStatus):
+        self.job_id = job_id
+        self.current = current
+        self.requested = requested
+        super().__init__(f"Invalid job transition for {job_id}: {current.value} -> {requested.value}")
+
+_job_status_and_results: Dict[str, JobRecord] = {}
 _submitted_jobs: Set[str] = set()
 
-# Lock 객체
 _job_status_lock = asyncio.Lock()
 _submitted_jobs_lock = asyncio.Lock()
 
-# --- 상태 관리 함수 ---
-async def get_job_info(job_id: str) -> Optional[Dict[str, Any]]:
-    """특정 작업의 전체 정보 조회"""
-    async with _job_status_lock:
-        job_info = _job_status_and_results.get(job_id)
-        return job_info.copy() if job_info else None
 
-async def get_job_status(job_id: str) -> Optional[str]:
-    """특정 작업의 상태 문자열 조회"""
+async def get_job_info(job_id: str) -> Optional[JobRecord]:
     async with _job_status_lock:
         job_info = _job_status_and_results.get(job_id)
-        return job_info['status'] if job_info else None
+    if job_info is None:
+        return None
+    return await asyncio.to_thread(job_info.model_copy, deep=True)
+
+
+async def get_job_status(job_id: str) -> Optional[JobStatus]:
+    async with _job_status_lock:
+        job_info = _job_status_and_results.get(job_id)
+        return job_info.status if job_info else None
 
 
 async def get_active_job_ids() -> Set[str]:
-    """Return job IDs that retention cleanup must preserve."""
-    active_statuses = {JobStatus.PENDING, JobStatus.RUNNING}
     async with _job_status_lock:
         return {
             job_id
             for job_id, job_info in _job_status_and_results.items()
-            if job_info.get('status') in active_statuses
+            if job_info.status.is_active
         }
 
-async def set_initial_status(job_id: str, job_name: str, job_path: str):
-    """작업 상태 초기화 (PENDING)"""
+
+async def set_initial_status(job_id: str, job_name: str, job_path: str) -> None:
     async with _job_status_lock:
         if job_id in _job_status_and_results:
-            logging.warning(f"Job ID {job_id} already exists in status dict during initialization.")
-        _job_status_and_results[job_id] = {
-            'status': JobStatus.PENDING,
-            'result': None,
-            'logs': None,
-            'job_path': job_path,
-            'jobname': job_name,
-            'submitted_at': datetime.now().isoformat(),
-            'duration': None
-        }
-    logging.debug(f"Initial status set for job {job_id}: PENDING")
+            logging.warning("Replacing existing state for job ID %s during initialization.", job_id)
+        _job_status_and_results[job_id] = JobRecord(
+            job_id=job_id,
+            jobname=job_name,
+            job_path=job_path,
+        )
+    logging.debug("Initial status set for job %s: %s", job_id, JobStatus.PENDING)
+
 
 async def update_job_status(
     job_id: str,
@@ -60,46 +60,54 @@ async def update_job_status(
     result: Any = None,
     duration: Optional[float] = None,
     logs: Optional[Dict[str, str]] = None,
-):
-    """작업 상태 및 결과 업데이트"""
-    async with _job_status_lock:
-        if job_id in _job_status_and_results:
-            _job_status_and_results[job_id]['status'] = status
-            if result is not None:
-                _job_status_and_results[job_id]['result'] = result
-            if duration is not None:
-                _job_status_and_results[job_id]['duration'] = duration
-            if logs is not None:
-                _job_status_and_results[job_id]['logs'] = logs
-            logging.debug(f"Status updated for job {job_id}: {status}")
-        else:
-            logging.warning(f"Attempted to update status for non-existent job ID: {job_id}")
+) -> bool:
+    if not isinstance(status, JobStatus):
+        raise TypeError("status must be a JobStatus")
 
-async def remove_job_state(job_id: str):
-    """오래된 작업 상태 정보 삭제"""
     async with _job_status_lock:
-        if job_id in _job_status_and_results:
-            del _job_status_and_results[job_id]
-            logging.info(f"Removed state for job ID: {job_id}")
-
-# --- 중복 작업 관리 함수 ---
-async def add_submitted_job(jobname: str) -> bool:
-    """중복 체크 및 submitted_jobs 세트에 추가. 성공 시 True 반환."""
-    async with _submitted_jobs_lock:
-        if jobname in _submitted_jobs:
-            logging.warning(f"Duplicate job submission detected for name: {jobname}")
+        current = _job_status_and_results.get(job_id)
+        if current is None:
+            logging.warning("Attempted to update status for non-existent job ID: %s", job_id)
             return False
-        _submitted_jobs.add(jobname)
-        logging.debug(f"Job name '{jobname}' added to submitted set.")
+
+        if current.status.is_terminal and status != current.status:
+            raise InvalidJobTransitionError(job_id, current.status, status)
+        if status in (JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED):
+            if not isinstance(result, JobError):
+                raise TypeError(f"{status.value} state requires a JobError result")
+
+        updates: Dict[str, Any] = {"status": status}
+        if result is not None:
+            updates["result"] = result
+        if duration is not None:
+            updates["duration_seconds"] = duration
+        if logs is not None:
+            updates["logs"] = logs
+        _job_status_and_results[job_id] = current.model_copy(update=updates, deep=True)
+        logging.debug("Status updated for job %s: %s", job_id, status)
         return True
 
-async def remove_submitted_job(jobname: str):
-    """submitted_jobs 세트에서 작업 이름 제거"""
+
+async def remove_job_state(job_id: str) -> None:
+    async with _job_status_lock:
+        if _job_status_and_results.pop(job_id, None) is not None:
+            logging.info("Removed state for job ID: %s", job_id)
+
+
+async def add_submitted_job(jobname: str) -> bool:
+    async with _submitted_jobs_lock:
+        if jobname in _submitted_jobs:
+            logging.warning("Duplicate job submission detected for name: %s", jobname)
+            return False
+        _submitted_jobs.add(jobname)
+        return True
+
+
+async def remove_submitted_job(jobname: str) -> None:
     async with _submitted_jobs_lock:
         _submitted_jobs.discard(jobname)
-        logging.debug(f"Job name '{jobname}' removed from submitted set.")
+
 
 async def is_job_submitted(jobname: str) -> bool:
-    """작업 이름이 현재 제출/처리 중인지 확인"""
     async with _submitted_jobs_lock:
         return jobname in _submitted_jobs

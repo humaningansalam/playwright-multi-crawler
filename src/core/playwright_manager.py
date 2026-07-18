@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import signal
 import socket
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -17,14 +18,26 @@ CDP_REQUEST_TIMEOUT_SECONDS = 1.0
 _playwright: Optional[Playwright] = None
 _browser: Optional[Browser] = None
 _shutting_down = False
+_requested_exit_code: Optional[int] = None
 _exit_process = os._exit
+_signal_process = os.kill
 
 
-def _on_browser_disconnected() -> None:
+def _on_browser_disconnected(_disconnected_browser: Browser) -> None:
+    global _requested_exit_code
     if _shutting_down:
         return
-    logging.critical("Shared Chromium disconnected unexpectedly; exiting for service recovery.")
-    _exit_process(1)
+    _requested_exit_code = 1
+    logging.critical("Shared Chromium disconnected unexpectedly; requesting service recovery.")
+    try:
+        _signal_process(os.getpid(), signal.SIGTERM)
+    except OSError:
+        logging.exception("Failed to request graceful service shutdown; exiting immediately.")
+        _exit_process(_requested_exit_code)
+
+
+def requested_exit_code() -> Optional[int]:
+    return _requested_exit_code
 
 
 def _browser_launch_options() -> dict[str, Any]:
@@ -110,7 +123,7 @@ async def _wait_for_cdp_ready() -> None:
 
 
 async def _close_resources() -> None:
-    global _playwright, _browser, _shutting_down
+    global _playwright, _browser, _shutting_down, _requested_exit_code
     _shutting_down = True
 
     browser = _browser
@@ -138,13 +151,14 @@ async def start() -> None:
     headless=False로 설정하여 화면을 띄우고,
     --remote-debugging-port 옵션으로 외부 프로세스 접속을 허용합니다.
     """
-    global _playwright, _browser, _shutting_down
+    global _playwright, _browser, _shutting_down, _requested_exit_code
     if _playwright:
         logging.warning("Playwright already started.")
         return
 
     try:
         _shutting_down = False
+        _requested_exit_code = None
         _assert_cdp_port_available()
         _playwright = await async_playwright().start()
         logging.info(f"Launching Playwright Browser Server on port {CDP_PORT}...")
