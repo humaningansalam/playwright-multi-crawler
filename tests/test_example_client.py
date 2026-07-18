@@ -2,6 +2,9 @@ import importlib.util
 import inspect
 from pathlib import Path
 
+import pytest
+
+from example import crawl as example_crawl
 from example.job import default_crawl_script_path
 from src.api.jobs import RESERVED_JOB_FILENAMES
 
@@ -48,3 +51,13 @@ def test_bundled_example_is_importable_with_worker_loader():
 
     assert module.crawl.__name__ == "crawl"
     assert inspect.iscoroutinefunction(module.crawl)
+
+
+@pytest.mark.asyncio
+async def test_bundled_example_propagates_crawl_failures(tmp_path):
+    class FailingPage:
+        async def goto(self, *_args, **_kwargs):
+            raise RuntimeError("navigation failed")
+
+    with pytest.raises(RuntimeError, match="navigation failed"):
+        await example_crawl.crawl(FailingPage(), object(), str(tmp_path))

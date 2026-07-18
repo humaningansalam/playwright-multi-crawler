@@ -116,7 +116,9 @@ async def crawl(page, context, job_path):
 
 - `page`와 `context`는 이 작업 전용 Playwright 객체입니다. 함수가 끝나면 runner가 닫습니다.
 - `job_path`는 이 작업의 전용 폴더입니다. 스크린샷이나 다운로드 파일은 이 경로에 저장하세요.
-- dict를 반환하면 완료 결과가 됩니다. `{"error": "..."}`를 반환하거나 예외가 발생하면 작업은 `FAILED`가 됩니다.
+- `crawl`이 정상 반환한 값은 API JSON 응답으로 직렬화할 수 있어야 하며, 직렬화된 값이 `COMPLETED` 결과로 보존됩니다. Tuple은 JSON array로 저장되고 `{"error": "..."}`도 일반 사용자 데이터입니다.
+- JSON object key는 string이어야 하고 float는 finite 값이어야 합니다. 값 손실이 필요한 변환이나 JSON으로 직렬화할 수 없는 값을 반환하면 작업은 `WORKER_RESULT_INVALID` 오류와 함께 `FAILED`가 됩니다.
+- 작업을 `FAILED`로 기록하려면 `crawl`에서 예외를 발생시키세요. runner가 예외와 traceback을 structured error로 기록합니다.
 - runner가 `result.json`을 atomic write로 관리하므로 스크립트와 추가 파일은 이 이름 및 `result.json.tmp`를 사용하면 안 됩니다.
 - 작업 프로세스의 stdout/stderr는 각각 `stdout.log`, `stderr.log`에 기록됩니다.
 
