@@ -44,3 +44,4 @@ PORT = int(os.environ.get("PORT", 5000))
 HOST = os.environ.get("HOST", "0.0.0.0")
 CDP_PORT = int(os.getenv("CDP_PORT", 9222))
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
+BROWSER_EXECUTABLE_PATH = os.getenv("BROWSER_EXECUTABLE_PATH") or None

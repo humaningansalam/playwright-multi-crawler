@@ -1,4 +1,6 @@
 #!/bin/bash
+set -Eeuo pipefail
+
 echo "Updating package lists..."
 sudo apt-get update
 

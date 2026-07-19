@@ -1,12 +1,17 @@
 import asyncio
 import logging
 import os
+import signal
 import tomllib
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager
 
 # API 라우터 임포트
@@ -22,6 +27,7 @@ from src.config import HOST, LOG_LEVEL, PORT, LOKI_URL, LOKI_TAGS, LOG_FILE_PATH
 
 from his_mon import setup_logging, ResourceMonitor
 from src.common.metrics import metrics
+from src.models.job import ApiErrorCode, ApiErrorDetail, ApiErrorResponse
 
 # 로깅 설정 실행
 setup_logging(
@@ -52,51 +58,56 @@ def _get_app_version() -> str:
 async def lifespan(app: FastAPI):
     """애플리케이션 시작/종료 시 실행"""
     logging.info("Application startup sequence initiated...")
-
-    # 리소스 모니터 시작
-    monitor = ResourceMonitor(metrics_obj=metrics, interval=5)
-    monitor.start()
-    app.state.monitor = monitor
-
     heavy_startup = os.getenv("RUN_HEAVY_STARTUP", "true").lower() == "true"
-
-    # 작업 폴더 확인/생성
-    tool_utils.ensure_job_folder()
-    # 가상 디스플레이 시작
-    if heavy_startup:
-        tool_utils.start_display()
-        # Playwright 시작 및 브라우저/컨텍스트 준비
-        await playwright_manager.start()
-    else:
-        logging.info("Skipping display/Playwright startup (RUN_HEAVY_STARTUP=false)")
-    # 워커 태스크 시작
-    if heavy_startup:
-        job_processor.start_workers()
-    else:
-        logging.info("Skipping worker startup (RUN_HEAVY_STARTUP=false)")
-    # 주기적 정리 작업 시작
-    app.state.cleanup_task = asyncio.create_task(
-        tool_utils.periodic_cleanup(),
-        name="PeriodicCleanupTask"
-    )
-
-    logging.info("Application startup sequence completed.")
+    monitor = None
+    display_started = False
+    playwright_start_attempted = False
+    workers_started = False
+    cleanup_task = None
+    app.state.job_submission_enabled = False
 
     try:
+        monitor = ResourceMonitor(metrics_obj=metrics, interval=5)
+        monitor.start()
+        app.state.monitor = monitor
+
+        tool_utils.ensure_job_folder()
+        if heavy_startup:
+            if not tool_utils.start_display():
+                raise RuntimeError("Virtual display startup failed; refusing to launch headful browser")
+            display_started = True
+            playwright_start_attempted = True
+            await playwright_manager.start()
+            job_processor.start_workers()
+            workers_started = True
+            app.state.job_submission_enabled = True
+        else:
+            logging.info("Skipping display/Playwright startup (RUN_HEAVY_STARTUP=false)")
+            logging.info("Skipping worker startup (RUN_HEAVY_STARTUP=false)")
+
+        cleanup_task = asyncio.create_task(tool_utils.periodic_cleanup(), name="PeriodicCleanupTask")
+        app.state.cleanup_task = cleanup_task
+        logging.info("Application startup sequence completed.")
         yield
     finally:
         logging.info("Application shutdown sequence initiated...")
-        # 워커 종료
-        if heavy_startup:
-            await job_processor.stop_workers()
-
-        if heavy_startup:
-            # Playwright 종료
-            await playwright_manager.shutdown()
-            # 가상 디스플레이 종료
+        app.state.job_submission_enabled = False
+        if workers_started:
+            try:
+                if playwright_manager.requested_exit_code() is None:
+                    await job_processor.stop_workers()
+                else:
+                    await job_processor.stop_workers(drain=False)
+            except Exception:
+                logging.exception("Worker shutdown failed; continuing resource teardown.")
+        if playwright_start_attempted:
+            try:
+                await playwright_manager.shutdown()
+            except Exception:
+                logging.exception("Playwright shutdown failed.")
+        if display_started:
             tool_utils.stop_display()
 
-        cleanup_task = getattr(app.state, "cleanup_task", None)
         if cleanup_task and not cleanup_task.done():
             cleanup_task.cancel()
             logging.info("Cancelled periodic cleanup task.")
@@ -104,6 +115,12 @@ async def lifespan(app: FastAPI):
                 await cleanup_task
             except asyncio.CancelledError:
                 pass
+
+        if monitor:
+            try:
+                monitor.stop()
+            except Exception:
+                logging.exception("Resource monitor shutdown failed.")
 
         logging.info("Application shutdown sequence completed.")
 
@@ -115,6 +132,38 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    detail = exc.detail
+    if (
+        exc.status_code == 400
+        and request.url.path == "/api/jobs/submit"
+        and not isinstance(detail, dict)
+    ):
+        detail = ApiErrorDetail(
+            code=ApiErrorCode.INVALID_SUBMISSION,
+            message="Invalid multipart form data",
+            context={"reason": str(exc.detail)},
+        ).model_dump(mode="json")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": jsonable_encoder(detail)},
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(_request, exc: RequestValidationError):
+    error = ApiErrorResponse(
+        detail=ApiErrorDetail(
+            code=ApiErrorCode.REQUEST_VALIDATION_FAILED,
+            message="Request validation failed",
+            context={"violations": jsonable_encoder(exc.errors())},
+        )
+    )
+    return JSONResponse(status_code=422, content=error.model_dump(mode="json"))
+
 # --- API 라우터 포함 ---
 app.include_router(jobs_api.router) 
 app.include_router(health_api.router) 
@@ -125,8 +174,30 @@ app.include_router(metrics_api.router)
 async def read_root():
     return {"message": "Welcome to the Playwright Job Runner API!"}
 
-# --- 실행 ---
-if __name__ == "__main__":
+def run_server() -> None:
     reload_enabled = os.getenv("UVICORN_RELOAD", "false").lower() == "true"
     logging.info(f"Starting Uvicorn server on {HOST}:{PORT}")
-    uvicorn.run("src.main:app", host=HOST, port=PORT, reload=reload_enabled, log_level="info")
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+    def preserve_requested_exit_code(received_signal, frame):
+        if playwright_manager.requested_exit_code() is not None:
+            return
+        if callable(previous_sigterm_handler):
+            previous_sigterm_handler(received_signal, frame)
+        elif previous_sigterm_handler != signal.SIG_IGN:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.raise_signal(signal.SIGTERM)
+
+    signal.signal(signal.SIGTERM, preserve_requested_exit_code)
+    try:
+        uvicorn.run("src.main:app", host=HOST, port=PORT, reload=reload_enabled, log_level="info")
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
+    exit_code = playwright_manager.requested_exit_code()
+    if exit_code is not None:
+        raise SystemExit(exit_code)
+
+
+# --- 실행 ---
+if __name__ == "__main__":
+    run_server()

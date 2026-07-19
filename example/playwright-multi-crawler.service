@@ -6,7 +6,8 @@ After=network.target graphical.target
 User=your_user 
 WorkingDirectory=/path/to/your/deployment/folder
 Environment="PATH=/home/your_user/.local/bin:/usr/local/bin:/usr/bin"
-ExecStart=uv run python -m src.main
+ExecStart=/home/your_user/.local/bin/uv run python -m src.main
+KillMode=mixed
 Restart=always
 
 [Install]
