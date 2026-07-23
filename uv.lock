@@ -321,8 +321,8 @@ wheels = [
 
 [[package]]
 name = "playwright-multi-crawler"
-version = "0.3.0"
-source = { virtual = "." }
+version = "0.4.0"
+source = { editable = "." }
 dependencies = [
     { name = "dotenv" },
     { name = "fastapi" },

@@ -27,6 +27,7 @@ from src.models.job import (
     ApiErrorCode,
     ApiErrorDetail,
     ApiErrorResponse,
+    JOB_STATE_FILENAME,
     JobCompletedResponse,
     JobError,
     JobErrorCode,
@@ -50,6 +51,7 @@ RESERVED_JOB_FILENAMES = {
     "result.json.tmp",
     "stdout.log",
     "stderr.log",
+    JOB_STATE_FILENAME,
 }
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 LOG_FILENAMES = ("stdout.log", "stderr.log")
@@ -256,6 +258,8 @@ def _list_job_files(job_path: str, base_download_url: str) -> Optional[Dict[str,
         return None
     files = {}
     for filename in os.listdir(job_dir):
+        if filename == JOB_STATE_FILENAME:
+            continue
         lookup = _lookup_resolved_job_file(job_dir, filename)
         if lookup.state == JobFileLookupState.AVAILABLE:
             files[filename] = f"{base_download_url}/{quote(filename, safe='')}"
@@ -271,13 +275,66 @@ def _create_job_path(job_path: str) -> None:
     os.makedirs(job_path, exist_ok=True)
 
 
-async def _rollback_job_submission(jobname: str, job_id: str, job_path: str) -> None:
-    await state.remove_submitted_job(jobname)
-    await state.remove_job_state(job_id)
+async def _rollback_job_submission_inner(jobname: str, job_id: str, job_path: str) -> None:
+    state_removed = False
+    try:
+        await state.remove_job_state(job_id)
+        state_removed = await state.get_job_info(job_id) is None
+    except Exception:
+        logging.exception("Failed to remove job state during rollback for %s.", job_id)
+
+    directory_removed = False
     try:
         await _run_file_operation(_remove_job_path, job_path)
+        directory_removed = True
     except OSError:
         logging.exception("Failed to remove partial job directory %s during rollback.", job_path)
+
+    if not state_removed and directory_removed:
+        try:
+            await state.remove_job_state(job_id)
+            state_removed = await state.get_job_info(job_id) is None
+        except Exception:
+            logging.exception("Failed to clear job state after rollback removed %s.", job_path)
+
+    if state_removed:
+        await state.remove_submitted_job(jobname)
+    else:
+        logging.error(
+            "Keeping active name reservation for %s because rollback did not remove job state %s.",
+            jobname,
+            job_id,
+        )
+
+
+async def _rollback_job_submission(jobname: str, job_id: str, job_path: str) -> None:
+    rollback_task = asyncio.create_task(
+        _rollback_job_submission_inner(jobname, job_id, job_path)
+    )
+    cancellation = None
+    while not rollback_task.done():
+        try:
+            await asyncio.shield(rollback_task)
+        except asyncio.CancelledError as current_cancellation:
+            if rollback_task.cancelled():
+                raise
+            if cancellation is None:
+                cancellation = current_cancellation
+        except Exception:
+            if cancellation is not None:
+                logging.exception("Submission rollback failed while cancellation was pending.")
+                raise cancellation
+            raise
+
+    try:
+        rollback_task.result()
+    except Exception:
+        if cancellation is not None:
+            logging.exception("Submission rollback failed while cancellation was pending.")
+            raise cancellation
+        raise
+    if cancellation is not None:
+        raise cancellation
 
 
 @router.post(
@@ -415,6 +472,7 @@ async def submit_job_endpoint(
 @router.post(
     "/{job_id}/cancel",
     response_model=JobStatusResponse,
+    response_model_exclude_none=True,
     responses={
         404: _error_response("Job not found"),
         409: _error_response("Job is already terminal"),
@@ -469,14 +527,23 @@ async def cancel_job_endpoint(job_id: str):
 @router.get(
     "/status/{job_id}",
     response_model=JobStatusResponse,
+    response_model_exclude_none=True,
     responses={404: _error_response("Job not found")},
 )
 async def get_job_status_endpoint(job_id: str):
     """특정 작업의 현재 상태를 조회합니다."""
-    status_val = await state.get_job_status(job_id)
-    if status_val is None:
+    job_info = await state.get_job_info(job_id)
+    if job_info is None:
         _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
-    return JobStatusResponse(job_id=job_id, status=status_val)
+    return JobStatusResponse(
+        job_id=job_id,
+        status=job_info.status,
+        submitted_at=job_info.submitted_at,
+        started_at=job_info.started_at,
+        completed_at=job_info.completed_at,
+        queue_wait_seconds=job_info.queue_wait_seconds,
+        run_duration_seconds=job_info.run_duration_seconds,
+    )
 
 
 @router.get(
@@ -498,7 +565,13 @@ async def get_job_results_endpoint(job_id: str):
 
     if status_val.is_active:
         # 처리 중인 경우 
-        return JobProcessingResponse(job_id=job_id, status=status_val)
+        return JobProcessingResponse(
+            job_id=job_id,
+            status=status_val,
+            submitted_at=job_info.submitted_at,
+            started_at=job_info.started_at,
+            queue_wait_seconds=job_info.queue_wait_seconds,
+        )
     if status_val.is_terminal:
         # 완료 또는 실패한 경우
         result_val = job_info.result
@@ -535,6 +608,10 @@ async def get_job_results_endpoint(job_id: str):
             files_error=files_error,
             jobname=job_info.jobname,
             submitted_at=job_info.submitted_at,
+            started_at=job_info.started_at,
+            completed_at=job_info.completed_at,
+            queue_wait_seconds=job_info.queue_wait_seconds,
+            run_duration_seconds=job_info.run_duration_seconds,
             duration_seconds=job_info.duration_seconds,
         )
 
@@ -618,6 +695,14 @@ async def download_file_endpoint(job_id: str, filename: str):
     job_info = await state.get_job_info(job_id)
     if not job_info:
         _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
+
+    if filename == JOB_STATE_FILENAME:
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            ApiErrorCode.FILE_NOT_FOUND,
+            "File not found",
+            filename=filename,
+        )
 
     opened_file = await _open_job_file_for_response(job_info.job_path, filename)
 

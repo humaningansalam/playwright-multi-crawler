@@ -20,10 +20,10 @@ from src.api import jobs as jobs_api
 from src.api import metrics as metrics_api
 from src.common import tool_utils
 # 핵심 모듈 임포트 (이벤트 핸들러에서 사용)
-from src.core import playwright_manager
+from src.core import job_queue, playwright_manager, state_manager
 from src.worker import job_processor
 # 설정 및 로깅 설정 함수 임포트
-from src.config import HOST, LOG_LEVEL, PORT, LOKI_URL, LOKI_TAGS, LOG_FILE_PATH
+from src.config import HOST, JOB_FOLDER, LOG_LEVEL, PORT, LOKI_URL, LOKI_TAGS, LOG_FILE_PATH
 
 from his_mon import setup_logging, ResourceMonitor
 from src.common.metrics import metrics
@@ -72,16 +72,19 @@ async def lifespan(app: FastAPI):
         app.state.monitor = monitor
 
         tool_utils.ensure_job_folder()
+        pending_jobs = await state_manager.recover_persisted_jobs(JOB_FOLDER)
         if heavy_startup:
             if not tool_utils.start_display():
                 raise RuntimeError("Virtual display startup failed; refusing to launch headful browser")
             display_started = True
             playwright_start_attempted = True
             await playwright_manager.start()
+            job_queue.restore_jobs(pending_jobs)
             job_processor.start_workers()
             workers_started = True
             app.state.job_submission_enabled = True
         else:
+            job_queue.restore_jobs(pending_jobs)
             logging.info("Skipping display/Playwright startup (RUN_HEAVY_STARTUP=false)")
             logging.info("Skipping worker startup (RUN_HEAVY_STARTUP=false)")
 

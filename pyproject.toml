@@ -1,6 +1,6 @@
 [project]
 name = "playwright-multi-crawler"
-version = "0.3.0"
+version = "0.4.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,6 +18,13 @@ dependencies = [
     "uvicorn>=0.38.0",
     "his-monitoring",
 ]
+
+[project.scripts]
+crawler = "src.cli:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
