@@ -6,6 +6,7 @@ import socket
 import threading
 import tomllib
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,7 @@ from src.models.job import (
     JobError,
     JobErrorCode,
     JobStatus,
+    PersistedJobStateV1,
     QueuedJob,
 )
 
@@ -650,9 +652,9 @@ async def test_periodic_cleanup_preserves_old_active_job(monkeypatch, tmp_path):
     job_dir = tmp_path / job_id
     job_dir.mkdir()
     (job_dir / "script.py").write_text("pass\n", encoding="utf-8")
+    await state.set_initial_status(job_id, "old_pending", str(job_dir))
     old_timestamp = time.time() - (tool_utils.JOB_RETENTION_DAYS + 1) * 24 * 3600
     os.utime(job_dir, (old_timestamp, old_timestamp))
-    await state.set_initial_status(job_id, "old_pending", str(job_dir))
 
     async def stop_after_one_cleanup(_seconds):
         raise asyncio.CancelledError()
@@ -803,6 +805,168 @@ async def test_submit_job_accepted(client: httpx.AsyncClient):
     assert "job_id" in result
     assert isinstance(result["job_id"], str)
     assert result["status"] == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_initial_persistence_failure_rolls_back_submission(
+    client: httpx.AsyncClient,
+    monkeypatch,
+):
+    job_name = "initial-persistence-failure"
+
+    def fail_persistence(_record):
+        raise OSError("state write failed")
+
+    monkeypatch.setattr(state, "_write_state_file_atomic", fail_persistence)
+    response = await client.post(
+        "/api/jobs/submit",
+        data={"jobname": job_name},
+        files={"script_file": ("crawl.py", DUMMY_SCRIPT_CONTENT, "text/x-python")},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == ApiErrorCode.SUBMISSION_FAILED
+    assert await state.is_job_submitted(job_name) is False
+    assert os.listdir(JOB_FOLDER) == []
+
+
+@pytest.mark.asyncio
+async def test_queue_failure_after_persistence_rolls_back_submission(
+    client: httpx.AsyncClient,
+    monkeypatch,
+):
+    job_name = "queue-failure-after-persistence"
+
+    async def fail_queue(_job):
+        raise RuntimeError("queue failed")
+
+    monkeypatch.setattr(job_queue, "add_job", fail_queue)
+    response = await client.post(
+        "/api/jobs/submit",
+        data={"jobname": job_name},
+        files={"script_file": ("crawl.py", DUMMY_SCRIPT_CONTENT, "text/x-python")},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == ApiErrorCode.SUBMISSION_FAILED
+    assert await state.is_job_submitted(job_name) is False
+    assert os.listdir(JOB_FOLDER) == []
+
+
+@pytest.mark.asyncio
+async def test_submission_rollback_survives_repeated_cancellation(monkeypatch, tmp_path):
+    job_id = "repeated-cancel-rollback"
+    job_name = "repeated_cancel_rollback"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    (job_dir / "script.py").write_text("pass\n", encoding="utf-8")
+    await state.add_submitted_job(job_name)
+    await state.set_initial_status(job_id, job_name, str(job_dir))
+    original_remove = state._remove_state_file
+    started = threading.Event()
+    release = threading.Event()
+
+    def delayed_remove(record):
+        started.set()
+        release.wait(timeout=5)
+        original_remove(record)
+
+    monkeypatch.setattr(state, "_remove_state_file", delayed_remove)
+    rollback_task = asyncio.create_task(
+        jobs_api._rollback_job_submission(job_name, job_id, str(job_dir))
+    )
+    assert await asyncio.to_thread(started.wait, 5)
+    rollback_task.cancel()
+    await asyncio.sleep(0)
+    rollback_task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await rollback_task
+
+    assert await state.get_job_info(job_id) is None
+    assert await state.is_job_submitted(job_name) is False
+    assert not job_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_submission_rollback_preserves_cancellation_when_inner_fails(monkeypatch):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_failure(_jobname, _job_id, _job_path):
+        started.set()
+        await release.wait()
+        raise OSError("rollback failed")
+
+    monkeypatch.setattr(jobs_api, "_rollback_job_submission_inner", delayed_failure)
+    rollback_task = asyncio.create_task(
+        jobs_api._rollback_job_submission("name", "job-id", "/tmp/job-id")
+    )
+    await started.wait()
+    rollback_task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await rollback_task
+
+
+@pytest.mark.asyncio
+async def test_rollback_retries_state_removal_after_directory_delete(monkeypatch, tmp_path):
+    job_id = "retry-state-removal"
+    job_name = "retry_state_removal"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    await state.add_submitted_job(job_name)
+    await state.set_initial_status(job_id, job_name, str(job_dir))
+    original_remove = state.remove_job_state
+    attempts = 0
+
+    async def fail_once(current_job_id):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("first removal failed")
+        await original_remove(current_job_id)
+
+    monkeypatch.setattr(state, "remove_job_state", fail_once)
+
+    await jobs_api._rollback_job_submission(job_name, job_id, str(job_dir))
+
+    assert attempts == 2
+    assert await state.get_job_info(job_id) is None
+    assert await state.is_job_submitted(job_name) is False
+    assert not job_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_rollback_keeps_name_when_state_and_directory_removal_fail(
+    monkeypatch,
+    tmp_path,
+):
+    job_id = "failed-rollback-cleanup"
+    job_name = "failed_rollback_cleanup"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    await state.add_submitted_job(job_name)
+    await state.set_initial_status(job_id, job_name, str(job_dir))
+
+    async def fail_state_removal(_job_id):
+        raise OSError("state removal failed")
+
+    def fail_directory_removal(_job_path):
+        raise OSError("directory removal failed")
+
+    monkeypatch.setattr(state, "remove_job_state", fail_state_removal)
+    monkeypatch.setattr(jobs_api, "_remove_job_path", fail_directory_removal)
+
+    await jobs_api._rollback_job_submission(job_name, job_id, str(job_dir))
+
+    assert await state.get_job_info(job_id) is not None
+    assert await state.is_job_submitted(job_name) is True
+    assert job_dir.exists()
 
 
 @pytest.mark.asyncio
@@ -1161,6 +1325,47 @@ async def test_worker_claim_updates_logical_queue_metric(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_restore_jobs_installs_batch_exactly_once():
+    jobs = [
+        QueuedJob(job_id="restore-a", jobname="restore_a", script_path="/tmp/a.py"),
+        QueuedJob(job_id="restore-b", jobname="restore_b", script_path="/tmp/b.py"),
+    ]
+
+    job_queue.restore_jobs(jobs)
+
+    assert job_queue.qsize() == 2
+    assert await job_queue.get_job() == jobs[0]
+    assert await job_queue.get_job() == jobs[1]
+
+
+def test_restore_jobs_rejects_duplicate_ids_without_partial_enqueue():
+    duplicate_jobs = [
+        QueuedJob(job_id="same-id", jobname="first", script_path="/tmp/a.py"),
+        QueuedJob(job_id="same-id", jobname="second", script_path="/tmp/b.py"),
+    ]
+
+    with pytest.raises(RuntimeError, match="Duplicate restored job ID"):
+        job_queue.restore_jobs(duplicate_jobs)
+
+    assert job_queue.qsize() == 0
+    assert job_queue._queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_restore_jobs_rejects_existing_queue_without_partial_enqueue():
+    existing = QueuedJob(job_id="existing", jobname="existing", script_path="/tmp/existing.py")
+    await job_queue.add_job(existing)
+
+    with pytest.raises(RuntimeError, match="non-empty queue state"):
+        job_queue.restore_jobs(
+            [QueuedJob(job_id="new", jobname="new", script_path="/tmp/new.py")]
+        )
+
+    assert job_queue.qsize() == 1
+    assert await job_queue.get_job() == existing
+
+
+@pytest.mark.asyncio
 async def test_cancel_claimed_pending_job_cancels_registered_dispatch_task(
     client: httpx.AsyncClient,
     monkeypatch,
@@ -1212,13 +1417,140 @@ async def test_get_completed_results_lists_downloadable_files(client: httpx.Asyn
     assert result_data["status"] == "COMPLETED"
     assert result_data["result"] == {"ok": True}
     assert result_data["logs"] == {"stdout": "tail output", "stderr": ""}
+    assert result_data["submitted_at"] is not None
+    assert result_data["completed_at"] is not None
+    assert result_data["run_duration_seconds"] == 1.25
+    assert result_data["duration_seconds"] == 1.25
     assert result_data["files"] == {
         "output.txt": f"/api/jobs/download/{job_id}/output.txt"
     }
+    assert (job_dir / "state.json").is_file()
 
     download_response = await client.get(f"/api/jobs/download/{job_id}/output.txt")
     assert download_response.status_code == 200
     assert download_response.content == b"crawl output"
+
+
+@pytest.mark.asyncio
+async def test_status_and_results_return_lifecycle_timestamps(
+    client: httpx.AsyncClient,
+    monkeypatch,
+    tmp_path,
+):
+    job_id = "timestamp-api"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    await state.set_initial_status(job_id, "timestamp_api", str(job_dir))
+    initial = await state.get_job_info(job_id)
+    assert initial is not None
+    started_at = initial.submitted_at + timedelta(seconds=4)
+    completed_at = started_at + timedelta(seconds=3)
+    times = iter([started_at, completed_at])
+    monkeypatch.setattr(state, "_now", lambda: next(times))
+
+    await state.update_job_status(job_id, JobStatus.RUNNING)
+    running_response = await client.get(f"/api/jobs/status/{job_id}")
+    await state.update_job_status(
+        job_id,
+        JobStatus.COMPLETED,
+        result={"ok": True},
+        duration=3.0,
+    )
+    completed_response = await client.get(f"/api/jobs/results/{job_id}")
+
+    assert running_response.json()["submitted_at"] == initial.submitted_at.isoformat()
+    assert running_response.json()["started_at"] == started_at.isoformat()
+    assert running_response.json()["queue_wait_seconds"] == 4.0
+    result = completed_response.json()
+    assert result["completed_at"] == completed_at.isoformat()
+    assert result["queue_wait_seconds"] == 4.0
+    assert result["run_duration_seconds"] == 3.0
+    assert result["duration_seconds"] == 3.0
+
+
+@pytest.mark.asyncio
+async def test_recovered_completed_job_remains_visible_through_results_and_download(
+    client: httpx.AsyncClient,
+    tmp_path,
+):
+    job_id = "recovered-completed"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    (job_dir / "output.txt").write_text("recovered output", encoding="utf-8")
+    persisted = PersistedJobStateV1(
+        job_id=job_id,
+        jobname="recovered_completed",
+        status=JobStatus.COMPLETED,
+        result={"recovered": True},
+        logs={"stdout": "done", "stderr": ""},
+        submitted_at=datetime(2026, 7, 23, 1, 2, 3),
+        duration_seconds=2.5,
+    )
+    (job_dir / "state.json").write_text(
+        persisted.model_dump_json(indent=2) + "\n",
+        encoding="utf-8",
+    )
+    await state.recover_persisted_jobs(tmp_path)
+
+    status_response = await client.get(f"/api/jobs/status/{job_id}")
+    results_response = await client.get(f"/api/jobs/results/{job_id}")
+    download_response = await client.get(f"/api/jobs/download/{job_id}/output.txt")
+    state_download_response = await client.get(f"/api/jobs/download/{job_id}/state.json")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == JobStatus.COMPLETED
+    assert results_response.status_code == 200
+    assert results_response.json()["status"] == JobStatus.COMPLETED
+    assert results_response.json()["result"] == {"recovered": True}
+    assert results_response.json()["files"] == {
+        "output.txt": f"/api/jobs/download/{job_id}/output.txt"
+    }
+    assert download_response.status_code == 200
+    assert download_response.content == b"recovered output"
+    assert "state.json" not in results_response.json()["files"]
+    assert state_download_response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_recovered_pending_job_blocks_duplicate_submission(
+    client: httpx.AsyncClient,
+    tmp_path,
+):
+    job_id = "recovered-pending"
+    job_name = "recovered_pending"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    (job_dir / "script.py").write_text("pass\n", encoding="utf-8")
+    persisted = PersistedJobStateV1(
+        job_id=job_id,
+        jobname=job_name,
+        status=JobStatus.PENDING,
+        submitted_at=datetime(2026, 7, 23, 1, 2, 3),
+    )
+    (job_dir / "state.json").write_text(
+        persisted.model_dump_json(indent=2) + "\n",
+        encoding="utf-8",
+    )
+    await state.recover_persisted_jobs(tmp_path)
+
+    response = await client.post(
+        "/api/jobs/submit",
+        data={"jobname": job_name},
+        files={"script_file": ("crawl.py", DUMMY_SCRIPT_CONTENT, "text/x-python")},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == ApiErrorCode.DUPLICATE_JOB_NAME
+
+    state_download_response = await client.get(
+        f"/api/jobs/download/{job_id}/state.json"
+    )
+    assert state_download_response.status_code == 404
+    assert state_download_response.json()["detail"] == {
+        "code": ApiErrorCode.FILE_NOT_FOUND,
+        "message": "File not found",
+        "context": {"filename": "state.json"},
+    }
 
 
 @pytest.mark.asyncio
@@ -1447,7 +1779,14 @@ async def test_submit_additional_file_rejects_path_traversal(client: httpx.Async
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "filename",
-    ["script.py", "result.json", "result.json.tmp", "stdout.log", "stderr.log"],
+    [
+        "script.py",
+        "result.json",
+        "result.json.tmp",
+        "stdout.log",
+        "stderr.log",
+        "state.json",
+    ],
 )
 async def test_submit_rejects_reserved_additional_filenames(client: httpx.AsyncClient, filename):
     response = await client.post(
@@ -1632,6 +1971,122 @@ async def test_heavy_lifespan_starts_workers(monkeypatch):
         assert calls == ["ensure_job_folder", "start_display", "playwright_start", "start_workers"]
 
     assert calls == ["ensure_job_folder", "start_display", "playwright_start", "start_workers", "stop_workers", "playwright_shutdown", "stop_display"]
+
+
+@pytest.mark.asyncio
+async def test_heavy_lifespan_recovers_before_workers_and_submissions(monkeypatch):
+    calls = []
+    pending = QueuedJob(
+        job_id="recovered-pending",
+        jobname="recovered_pending",
+        script_path="/tmp/recovered.py",
+    )
+
+    class FakeMonitor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            calls.append("monitor_start")
+
+        def stop(self):
+            calls.append("monitor_stop")
+
+    async def fake_recover(job_root):
+        assert job_root == main_module.JOB_FOLDER
+        assert app.state.job_submission_enabled is False
+        calls.append("recover")
+        return [pending]
+
+    async def fake_playwright_start():
+        calls.append("playwright_start")
+
+    async def fake_playwright_shutdown():
+        calls.append("playwright_shutdown")
+
+    async def fake_stop_workers():
+        calls.append("stop_workers")
+
+    def fake_restore(jobs):
+        assert jobs == [pending]
+        assert app.state.job_submission_enabled is False
+        calls.append("restore_queue")
+
+    def fake_start_workers():
+        assert app.state.job_submission_enabled is False
+        calls.append("start_workers")
+
+    monkeypatch.setattr(main_module, "ResourceMonitor", FakeMonitor)
+    monkeypatch.setattr(main_module.tool_utils, "ensure_job_folder", lambda: calls.append("ensure"))
+    monkeypatch.setattr(main_module.state_manager, "recover_persisted_jobs", fake_recover)
+    monkeypatch.setattr(main_module.tool_utils, "start_display", lambda: calls.append("display") or True)
+    monkeypatch.setattr(main_module.tool_utils, "stop_display", lambda: calls.append("stop_display"))
+    monkeypatch.setattr(main_module.playwright_manager, "start", fake_playwright_start)
+    monkeypatch.setattr(main_module.playwright_manager, "shutdown", fake_playwright_shutdown)
+    monkeypatch.setattr(main_module.job_queue, "restore_jobs", fake_restore)
+    monkeypatch.setattr(main_module.job_processor, "start_workers", fake_start_workers)
+    monkeypatch.setattr(main_module.job_processor, "stop_workers", fake_stop_workers)
+    monkeypatch.setattr(main_module.tool_utils, "periodic_cleanup", lambda: asyncio.sleep(0))
+    monkeypatch.setenv("RUN_HEAVY_STARTUP", "true")
+
+    async with app.router.lifespan_context(app):
+        assert app.state.job_submission_enabled is True
+        assert calls == [
+            "monitor_start",
+            "ensure",
+            "recover",
+            "display",
+            "playwright_start",
+            "restore_queue",
+            "start_workers",
+        ]
+
+    assert calls[-4:] == ["stop_workers", "playwright_shutdown", "stop_display", "monitor_stop"]
+
+
+@pytest.mark.asyncio
+async def test_lightweight_lifespan_recovers_queue_without_enabling_submissions(monkeypatch):
+    calls = []
+    pending = QueuedJob(job_id="pending", jobname="pending", script_path="/tmp/script.py")
+
+    async def fake_recover(_job_root):
+        calls.append("recover")
+        return [pending]
+
+    monkeypatch.setattr(main_module.tool_utils, "ensure_job_folder", lambda: calls.append("ensure"))
+    monkeypatch.setattr(main_module.state_manager, "recover_persisted_jobs", fake_recover)
+    monkeypatch.setattr(main_module.job_queue, "restore_jobs", lambda jobs: calls.append(("restore", jobs)))
+    monkeypatch.setattr(main_module.job_processor, "start_workers", lambda: calls.append("workers"))
+    monkeypatch.setattr(main_module.tool_utils, "periodic_cleanup", lambda: asyncio.sleep(0))
+    monkeypatch.setenv("RUN_HEAVY_STARTUP", "false")
+
+    async with app.router.lifespan_context(app):
+        assert app.state.job_submission_enabled is False
+        assert calls == ["ensure", "recover", ("restore", [pending])]
+
+
+@pytest.mark.asyncio
+async def test_recovery_failure_prevents_downstream_startup(monkeypatch):
+    calls = []
+
+    async def fail_recovery(_job_root):
+        calls.append("recover")
+        raise RuntimeError("unsupported schema")
+
+    monkeypatch.setattr(main_module.tool_utils, "ensure_job_folder", lambda: calls.append("ensure"))
+    monkeypatch.setattr(main_module.state_manager, "recover_persisted_jobs", fail_recovery)
+    monkeypatch.setattr(main_module.tool_utils, "start_display", lambda: calls.append("display") or True)
+    monkeypatch.setattr(main_module.playwright_manager, "start", lambda: calls.append("browser"))
+    monkeypatch.setattr(main_module.job_queue, "restore_jobs", lambda _jobs: calls.append("queue"))
+    monkeypatch.setattr(main_module.job_processor, "start_workers", lambda: calls.append("workers"))
+    monkeypatch.setenv("RUN_HEAVY_STARTUP", "true")
+
+    with pytest.raises(RuntimeError, match="unsupported schema"):
+        async with app.router.lifespan_context(app):
+            pytest.fail("lifespan must not yield after recovery failure")
+
+    assert calls == ["ensure", "recover"]
+    assert app.state.job_submission_enabled is False
 
 
 @pytest.mark.asyncio

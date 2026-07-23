@@ -74,3 +74,22 @@ async def put_shutdown_signal(num_signals: int) -> None:
 
 def qsize() -> int:
     return len(_queued_job_ids)
+
+
+def restore_jobs(jobs: list[QueuedJob]) -> None:
+    restored_ids: set[str] = set()
+    for job in jobs:
+        if not isinstance(job, QueuedJob):
+            raise TypeError("all restored jobs must be QueuedJob instances")
+        if job.job_id in restored_ids:
+            raise RuntimeError(f"Duplicate restored job ID: {job.job_id}")
+        restored_ids.add(job.job_id)
+
+    if not _queue.empty() or _queued_job_ids or _claimed_job_ids or _cancelled_job_ids:
+        raise RuntimeError("Cannot restore jobs into non-empty queue state")
+
+    for job in jobs:
+        _queue.put_nowait(job)
+    _queued_job_ids.update(restored_ids)
+    metrics.queued_jobs.set(qsize())
+    logging.info("Restored %d pending jobs into the queue.", len(jobs))

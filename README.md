@@ -66,7 +66,7 @@ curl -X POST http://localhost:5000/api/jobs/submit \
 
 성공하면 `202 Accepted`와 `job_id`, `PENDING` 상태를 받습니다. 동일한 `jobname`이 대기 또는 실행 중이면 `409 Conflict`를 받습니다. 워커가 준비되지 않았으면 작업 폴더나 상태를 만들지 않고 `503`을 반환합니다.
 
-`additional_files`는 작업 폴더의 최상위 파일명만 사용할 수 있습니다. 경로, `..`, 중복 파일명, 그리고 runner가 사용하는 `script.py`, `result.json`, `result.json.tmp`, `stdout.log`, `stderr.log`는 거부됩니다.
+`additional_files`는 작업 폴더의 최상위 파일명만 사용할 수 있습니다. 경로, `..`, 중복 파일명, 그리고 서비스가 사용하는 `script.py`, `result.json`, `result.json.tmp`, `stdout.log`, `stderr.log`, `state.json`은 거부됩니다.
 
 ### 작업 상태와 취소
 
@@ -90,6 +90,8 @@ curl http://localhost:5000/api/jobs/results/<job_id>
 
 `PENDING` 또는 `RUNNING` 결과 조회는 아직 처리 중이라는 응답을 반환합니다. 종료 상태인 `COMPLETED`, `FAILED`, `CANCELLED`, `INTERRUPTED`에서는 결과 데이터, 로그의 마지막 64 KiB, 그리고 작업 폴더 파일의 다운로드 URL을 받습니다.
 
+상태와 결과 응답에는 가능한 범위에서 `submitted_at`, `started_at`, `completed_at`, `queue_wait_seconds`, `run_duration_seconds`가 포함됩니다. 기존 `duration_seconds`는 호환성을 위해 실제 실행 시간과 같은 값으로 유지됩니다.
+
 결과 파일 다운로드
 
 ```bash
@@ -103,6 +105,22 @@ curl -N http://localhost:5000/api/jobs/logs/<job_id>
 ```
 
 이 스트림은 `event: stdout` 및 `event: stderr`를 전송하고 작업이 종료하면 끝납니다. 다운로드 API는 작업 폴더 밖으로 나가는 경로를 허용하지 않습니다.
+
+## Crawler CLI
+
+설치된 `crawler` 명령은 스크립트를 제출하고, stdout/stderr 로그를 실시간으로 따라간 뒤, 종료 결과와 산출물을 내려받습니다.
+
+```bash
+uv run crawler example/crawl.py \
+  --job-name naver-news \
+  --file example/input.json \
+  --server http://localhost:5000 \
+  --output downloads
+```
+
+`--file`은 필요한 만큼 반복할 수 있습니다. 완료된 파일은 `<output>/<job_id>/`에 저장됩니다. 작업이 `FAILED`, `CANCELLED`, 또는 `INTERRUPTED`로 끝나면 CLI는 결과 JSON을 출력하고 종료 코드 `1`을 반환합니다.
+
+로그를 따라가는 동안 `Ctrl+C`를 누르면 CLI는 현재 원격 작업의 cancel endpoint를 호출하고 종료 코드 `130`으로 끝납니다.
 
 ### 작업 스크립트 계약
 

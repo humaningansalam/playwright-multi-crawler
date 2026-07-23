@@ -85,6 +85,31 @@ class JobRecord(BaseModel):
     result: Any = None
     logs: Optional[Dict[str, str]] = None
     submitted_at: datetime = Field(default_factory=datetime.now)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    queue_wait_seconds: Optional[float] = None
+    run_duration_seconds: Optional[float] = None
+    duration_seconds: Optional[float] = None
+
+
+JOB_STATE_FILENAME = "state.json"
+JOB_STATE_SCHEMA_VERSION = 1
+
+
+class PersistedJobStateV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = JOB_STATE_SCHEMA_VERSION
+    job_id: str
+    jobname: str
+    status: JobStatus
+    result: Any = None
+    logs: Optional[Dict[str, str]] = None
+    submitted_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    queue_wait_seconds: Optional[float] = None
+    run_duration_seconds: Optional[float] = None
     duration_seconds: Optional[float] = None
 
 
@@ -124,6 +149,11 @@ class JobSubmitResponse(BaseModel):
 class JobStatusResponse(BaseModel):
     job_id: str
     status: JobStatus
+    submitted_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    queue_wait_seconds: Optional[float] = None
+    run_duration_seconds: Optional[float] = None
 
 
 class FileInfo(BaseModel):
@@ -142,6 +172,10 @@ class JobResultResponse(BaseModel):
     files_error: Optional[ApiErrorDetail] = None
     jobname: Optional[str] = None
     submitted_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    queue_wait_seconds: Optional[float] = None
+    run_duration_seconds: Optional[float] = None
     duration_seconds: Optional[float] = None
 
 
@@ -164,6 +198,9 @@ class JobProcessingResponse(BaseModel):
 
     job_id: str
     status: Literal[JobStatus.PENDING, JobStatus.RUNNING]
+    submitted_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    queue_wait_seconds: Optional[float] = None
     message: str = "Job is still processing."
 
 

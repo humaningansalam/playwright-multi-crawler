@@ -19,6 +19,9 @@ dependencies = [
     "his-monitoring",
 ]
 
+[project.scripts]
+crawler = "src.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
