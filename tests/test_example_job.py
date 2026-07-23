@@ -3,87 +3,122 @@ import subprocess
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 from example import job
-from src.models.job import ApiErrorCode, JobCompletedResponse, JobResultResponse, JobStatus
+from src.models.job import JobProcessingResponse, JobStatus
 
 
-class _Response:
-    status_code = 200
+def _client(handler):
+    return httpx.Client(transport=httpx.MockTransport(handler))
 
-    def __init__(self, payload):
-        self._payload = payload
 
-    def raise_for_status(self):
-        return None
+def test_bundled_client_uploads_crawl_script_and_additional_file(tmp_path):
+    extra = tmp_path / "input.txt"
+    extra.write_text("input", encoding="utf-8")
 
-    def json(self):
-        return self._payload
+    def handler(request):
+        assert request.method == "POST"
+        assert request.url.path == "/api/jobs/submit"
+        body = request.read()
+        assert b'filename="crawl.py"' in body
+        assert b'filename="input.txt"' in body
+        assert b"example-job" in body
+        return httpx.Response(202, json={"job_id": "job-1", "status": "PENDING"})
+
+    with _client(handler) as client:
+        job_id = job.submit_job(
+            client,
+            job.default_crawl_script_path(),
+            "example-job",
+            [extra],
+            server="http://service.local",
+        )
+
+    assert job_id == "job-1"
 
 
 @pytest.mark.parametrize("status", [JobStatus.CANCELLED, JobStatus.INTERRUPTED])
-def test_bundled_client_stops_polling_for_terminal_statuses(monkeypatch, status):
-    calls = []
+def test_bundled_client_stops_polling_for_terminal_statuses(status):
+    def handler(_request):
+        return httpx.Response(200, json={"job_id": "job-1", "status": status})
 
-    def get(_url, timeout):
-        calls.append(timeout)
-        return _Response({"job_id": "terminal-job", "status": status})
-
-    monkeypatch.setattr(job.requests, "get", get)
-    monkeypatch.setattr(job.time, "sleep", lambda _seconds: pytest.fail("terminal status must not sleep"))
-
-    result = job.poll_job_status("terminal-job")
+    with _client(handler) as client:
+        result = job.poll_job_status(
+            client,
+            "job-1",
+            server="http://service.local",
+            interval_seconds=0,
+        )
 
     assert result == job.PollResult(job.PollOutcome.TERMINAL, status)
-    assert calls == [10]
 
 
-def test_bundled_client_reports_unknown_status_as_invalid_response(monkeypatch):
-    monkeypatch.setattr(
-        job.requests,
-        "get",
-        lambda _url, timeout: _Response({"job_id": "job-1", "status": "ALMOST_DONE"}),
-    )
+def test_bundled_client_reports_unknown_status_as_invalid_response():
+    def handler(_request):
+        return httpx.Response(200, json={"job_id": "job-1", "status": "ALMOST_DONE"})
 
-    assert job.poll_job_status("job-1") == job.PollResult(job.PollOutcome.INVALID_RESPONSE)
+    with _client(handler) as client:
+        result = job.poll_job_status(
+            client,
+            "job-1",
+            server="http://service.local",
+            interval_seconds=0,
+        )
 
-
-@pytest.mark.parametrize(
-    "payload, expected_type",
-    [
-        ({"job_id": "job-1", "status": JobStatus.COMPLETED}, JobCompletedResponse),
-        (
-            {"job_id": "job-1", "status": JobStatus.PENDING, "message": "still running"},
-            job.JobProcessingResponse,
-        ),
-    ],
-)
-def test_bundled_client_discriminates_result_shape_by_status(monkeypatch, payload, expected_type):
-    monkeypatch.setattr(job.requests, "get", lambda _url, timeout: _Response(payload))
-
-    result = job.get_job_results("job-1")
-
-    assert isinstance(result, expected_type)
+    assert result == job.PollResult(job.PollOutcome.INVALID_RESPONSE)
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"job_id": "job-1", "status": JobStatus.PENDING, "result": {"premature": True}},
-        {"job_id": "job-1", "status": JobStatus.FAILED, "message": "still processing"},
-        {"job_id": "job-1", "status": JobStatus.FAILED},
-        {
-            "job_id": "job-1",
-            "status": JobStatus.CANCELLED,
-            "result": {"unexpected": True},
-        },
-    ],
-)
-def test_bundled_client_rejects_status_shape_mismatch(monkeypatch, payload):
-    monkeypatch.setattr(job.requests, "get", lambda _url, timeout: _Response(payload))
+def test_bundled_client_cancels_remote_job():
+    def handler(request):
+        assert request.method == "POST"
+        assert request.url.path == "/api/jobs/job-1/cancel"
+        return httpx.Response(200, json={"job_id": "job-1", "status": "CANCELLED"})
 
-    assert job.get_job_results("job-1") is None
+    with _client(handler) as client:
+        result = job.cancel_job(client, "job-1", server="http://service.local")
+
+    assert result.status == JobStatus.CANCELLED
+
+
+def test_bundled_client_downloads_result_files(tmp_path):
+    requests = []
+
+    def handler(request):
+        requests.append(request.url.path)
+        if request.url.path == "/api/jobs/results/job-1":
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job-1",
+                    "status": "COMPLETED",
+                    "result": {"ok": True},
+                    "files": {"screenshot.png": "/api/jobs/download/job-1/screenshot.png"},
+                },
+            )
+        if request.url.path == "/api/jobs/download/job-1/screenshot.png":
+            return httpx.Response(200, content=b"screenshot")
+        raise AssertionError(request.url)
+
+    with _client(handler) as client:
+        result = job.get_job_results(client, "job-1", server="http://service.local")
+        assert result is not None
+        assert not isinstance(result, JobProcessingResponse)
+        assert result.files is not None
+        job.download_files(
+            client,
+            "job-1",
+            result.files,
+            server="http://service.local",
+            output_dir=tmp_path,
+        )
+
+    assert requests == [
+        "/api/jobs/results/job-1",
+        "/api/jobs/download/job-1/screenshot.png",
+    ]
+    assert (tmp_path / "job-1" / "screenshot.png").read_bytes() == b"screenshot"
 
 
 def test_bundled_client_is_importable_from_its_script_directory():
@@ -95,60 +130,35 @@ def test_bundled_client_is_importable_from_its_script_directory():
         text=True,
         check=False,
     )
+
     assert result.returncode == 0, result.stderr
+    assert job.default_crawl_script_path().is_file()
 
 
-def test_bundled_client_downloads_artifact_named_error(monkeypatch):
-    files = {"error": "/api/jobs/download/job-1/error"}
-    downloaded = []
-    response = _Response({"job_id": "job-1", "status": JobStatus.COMPLETED, "files": files})
-
-    monkeypatch.setattr(job.requests, "get", lambda _url, timeout: response)
-    monkeypatch.setattr(job, "download_files", lambda job_id, listing: downloaded.append((job_id, listing)))
-
-    result = job.get_job_results("job-1")
-
-    assert isinstance(result, JobResultResponse)
-    assert result.files == files
-    assert downloaded == [("job-1", files)]
-
-
-def test_bundled_client_reports_structured_file_listing_error(monkeypatch):
-    response = _Response(
-        {
-            "job_id": "job-1",
-            "status": JobStatus.COMPLETED,
-            "files_error": {
-                "code": ApiErrorCode.RESULT_FILES_UNAVAILABLE,
-                "message": "Could not list result files",
-            },
-        }
-    )
-    monkeypatch.setattr(job.requests, "get", lambda _url, timeout: response)
-
-    result = job.get_job_results("job-1")
-
-    assert isinstance(result, JobResultResponse)
-    assert result.files is None
-    assert result.files_error.code == ApiErrorCode.RESULT_FILES_UNAVAILABLE
-
-
-def test_bundled_cli_prints_terminal_result(monkeypatch, capsys):
-    terminal_result = JobCompletedResponse(
-        job_id="job-1",
-        status=JobStatus.COMPLETED,
-        result={"items": ["one"]},
-        jobname="example-job",
-        duration_seconds=1.25,
-    )
+def test_bundled_client_run_prints_terminal_result(monkeypatch, capsys):
+    terminal_payload = {
+        "job_id": "job-1",
+        "status": "COMPLETED",
+        "result": {"items": ["one"]},
+    }
     monkeypatch.setattr(job, "submit_job", lambda *_args, **_kwargs: "job-1")
     monkeypatch.setattr(
         job,
         "poll_job_status",
-        lambda _job_id: job.PollResult(job.PollOutcome.TERMINAL, JobStatus.COMPLETED),
+        lambda *_args, **_kwargs: job.PollResult(job.PollOutcome.TERMINAL, JobStatus.COMPLETED),
     )
-    monkeypatch.setattr(job, "get_job_results", lambda _job_id: terminal_result)
+    monkeypatch.setattr(
+        job,
+        "get_job_results",
+        lambda *_args, **_kwargs: job.JOB_RESULTS_RESPONSE_ADAPTER.validate_python(terminal_payload),
+    )
 
-    job.main()
+    with _client(lambda _request: pytest.fail("network must not be called")) as client:
+        assert job.run(client) == 0
 
-    assert json.loads(capsys.readouterr().out) == terminal_result.model_dump(mode="json")
+    output = json.loads(capsys.readouterr().out)
+    assert output["job_id"] == terminal_payload["job_id"]
+    assert output["status"] == terminal_payload["status"]
+    assert output["result"] == terminal_payload["result"]
+    assert "submitted_at" in output
+    assert "run_duration_seconds" in output

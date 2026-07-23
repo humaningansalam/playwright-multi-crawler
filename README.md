@@ -112,8 +112,7 @@ curl -N http://localhost:5000/api/jobs/logs/<job_id>
 
 ```bash
 uv run crawler example/crawl.py \
-  --job-name naver-news \
-  --file example/input.json \
+  --job-name example-domain \
   --server http://localhost:5000 \
   --output downloads
 ```
@@ -121,6 +120,16 @@ uv run crawler example/crawl.py \
 `--file`은 필요한 만큼 반복할 수 있습니다. 완료된 파일은 `<output>/<job_id>/`에 저장됩니다. 작업이 `FAILED`, `CANCELLED`, 또는 `INTERRUPTED`로 끝나면 CLI는 결과 JSON을 출력하고 종료 코드 `1`을 반환합니다.
 
 로그를 따라가는 동안 `Ctrl+C`를 누르면 CLI는 현재 원격 작업의 cancel endpoint를 호출하고 종료 코드 `130`으로 끝납니다.
+
+### Python API client example
+
+`example/job.py`는 애플리케이션 코드에서 HTTP API를 직접 사용하는 예제입니다. bundled `example/crawl.py`를 업로드하고, status endpoint를 polling한 뒤 결과와 생성 파일을 다운로드합니다. 실행 중 `Ctrl+C`를 누르면 원격 작업도 취소합니다.
+
+```bash
+uv run python example/job.py
+```
+
+터미널에서 한 번 실행할 때는 `crawler` 명령을 사용하고, 제출·상태 조회·취소·결과 처리를 Python 코드에 통합할 때는 `example/job.py`의 함수 구성을 참고하세요.
 
 ### 작업 스크립트 계약
 
@@ -161,7 +170,7 @@ async def crawl(page, context, job_path):
 
 Prometheus-compatible runtime metrics는 `GET /metrics`에서 조회할 수 있습니다.
 
-작업 상태는 현재 서비스 프로세스의 메모리에 보관됩니다. 작업 폴더와 파일은 retention 기간 동안 남을 수 있지만, 서버 재시작 뒤에는 이전 작업 ID의 status/results API 조회나 대기 작업의 자동 재개를 보장하지 않습니다. 클라이언트는 중요한 결과 파일을 완료 직후 내려받아 보관해야 합니다.
+작업 상태는 각 작업 폴더의 `state.json`에 저장됩니다. 서버가 재시작되면 종료된 작업은 기존 상태로 복구되고, `PENDING` 작업은 다시 queue에 등록되며, 재시작 당시 `RUNNING`이던 작업은 `INTERRUPTED`와 `SERVICE_SHUTDOWN` 오류로 종료됩니다. 작업 폴더는 retention 정책에 따라 삭제될 수 있으므로 클라이언트는 중요한 결과 파일을 완료 직후 내려받아 보관해야 합니다.
 
 ## 환경 변수
 

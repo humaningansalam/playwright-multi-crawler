@@ -5,28 +5,23 @@ from pathlib import Path
 import pytest
 
 from example import crawl as example_crawl
-from example.job import default_crawl_script_path
 from src.api.jobs import RESERVED_JOB_FILENAMES
-
-
-def test_example_client_default_crawl_script_exists():
-    script_path = Path(default_crawl_script_path())
-
-    assert script_path.name == "crawl.py"
-    assert script_path.exists()
-    assert script_path.parent.name == "example"
 
 
 def test_readme_submit_example_uses_bundled_crawl_script():
     readme = Path(__file__).resolve().parents[1] / "README.md"
+    content = readme.read_text(encoding="utf-8")
 
-    assert '-F "script_file=@example/crawl.py"' in readme.read_text(encoding="utf-8")
+    assert '-F "script_file=@example/crawl.py"' in content
+    assert "uv run crawler example/crawl.py" in content
 
 
 def test_readme_submit_example_does_not_require_missing_additional_file():
     readme = Path(__file__).resolve().parents[1] / "README.md"
+    content = readme.read_text(encoding="utf-8")
 
-    assert '@textfile.txt' not in readme.read_text(encoding="utf-8")
+    assert '@textfile.txt' not in content
+    assert "example/input.json" not in content
 
 
 def test_readme_documents_all_reserved_additional_filenames():
@@ -61,3 +56,27 @@ async def test_bundled_example_propagates_crawl_failures(tmp_path):
 
     with pytest.raises(RuntimeError, match="navigation failed"):
         await example_crawl.crawl(FailingPage(), object(), str(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_bundled_example_returns_downloadable_screenshot(tmp_path):
+    class Page:
+        async def goto(self, url, **options):
+            assert url == "https://example.com/"
+            assert options == {"wait_until": "domcontentloaded", "timeout": 30_000}
+
+        async def title(self):
+            return "Example Domain"
+
+        async def screenshot(self, *, path, full_page):
+            assert full_page is True
+            Path(path).write_bytes(b"screenshot")
+
+    result = await example_crawl.crawl(Page(), object(), str(tmp_path))
+
+    assert result == {
+        "target_url": "https://example.com/",
+        "title": "Example Domain",
+        "screenshot_file": "screenshot.png",
+    }
+    assert (tmp_path / "screenshot.png").read_bytes() == b"screenshot"
