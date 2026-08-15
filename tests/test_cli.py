@@ -101,6 +101,30 @@ def test_run_returns_failure_for_terminal_error(tmp_path):
         assert cli.run(args, client) == 1
 
 
+def test_submit_surfaces_structured_api_error(tmp_path):
+    script = tmp_path / "crawl.py"
+    script.write_text("pass\n", encoding="utf-8")
+
+    def handler(_request):
+        return httpx.Response(
+            503,
+            json={
+                "detail": {
+                    "code": "WORKERS_UNAVAILABLE",
+                    "message": "Job workers are unavailable",
+                    "context": {},
+                }
+            },
+        )
+
+    with _client(handler) as client:
+        with pytest.raises(cli.CrawlerCliError) as error:
+            cli.submit_job(client, "http://service.local", script, "demo", [])
+
+    assert "WORKERS_UNAVAILABLE" in str(error.value)
+    assert "Job workers are unavailable" in str(error.value)
+
+
 def test_download_rejects_other_origin():
     with pytest.raises(cli.CrawlerCliError, match="outside"):
         cli._download_url("http://service.local", "http://other.local/file")

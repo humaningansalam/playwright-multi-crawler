@@ -15,6 +15,24 @@ class CrawlerCliError(RuntimeError):
     pass
 
 
+def _raise_for_status(response: httpx.Response) -> None:
+    if response.is_success:
+        return
+    try:
+        payload = response.json()
+    except ValueError:
+        response.raise_for_status()
+        return
+
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if isinstance(detail, dict):
+        code = detail.get("code")
+        message = detail.get("message")
+        if isinstance(code, str) and isinstance(message, str):
+            raise CrawlerCliError(f"{code}: {message}")
+    response.raise_for_status()
+
+
 def _api_url(server: str, path: str) -> str:
     return urljoin(f"{server.rstrip('/')}/", path.lstrip("/"))
 
@@ -52,7 +70,7 @@ def submit_job(
             data={"jobname": job_name},
             files=files,
         )
-    response.raise_for_status()
+    _raise_for_status(response)
     payload = response.json()
     job_id = payload.get("job_id")
     if not isinstance(job_id, str) or not job_id:
@@ -63,7 +81,7 @@ def submit_job(
 def follow_logs(client: httpx.Client, server: str, job_id: str) -> None:
     event_name = "stdout"
     with client.stream("GET", _api_url(server, f"/api/jobs/logs/{job_id}")) as response:
-        response.raise_for_status()
+        _raise_for_status(response)
         for line in response.iter_lines():
             if line.startswith("event:"):
                 event_name = line.removeprefix("event:").strip()
@@ -75,7 +93,7 @@ def follow_logs(client: httpx.Client, server: str, job_id: str) -> None:
 
 def cancel_job(client: httpx.Client, server: str, job_id: str) -> None:
     response = client.post(_api_url(server, f"/api/jobs/{job_id}/cancel"))
-    response.raise_for_status()
+    _raise_for_status(response)
 
 
 def _download_url(server: str, path: str) -> str:
@@ -93,7 +111,7 @@ def fetch_result_and_download(
     output_dir: Path,
 ):
     response = client.get(_api_url(server, f"/api/jobs/results/{job_id}"))
-    response.raise_for_status()
+    _raise_for_status(response)
     result = JOB_RESULTS_RESPONSE_ADAPTER.validate_python(response.json())
     if isinstance(result, JobProcessingResponse):
         raise CrawlerCliError("Log stream ended before the job reached a terminal state")
@@ -103,7 +121,7 @@ def fetch_result_and_download(
         job_output.mkdir(parents=True, exist_ok=True)
         for filename, path in result.files.items():
             download = client.get(_download_url(server, path))
-            download.raise_for_status()
+            _raise_for_status(download)
             (job_output / filename).write_bytes(download.content)
     return result
 
