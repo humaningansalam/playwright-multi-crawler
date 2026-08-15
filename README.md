@@ -119,6 +119,8 @@ uv run crawler example/crawl.py \
 
 `--file`은 필요한 만큼 반복할 수 있습니다. 완료된 파일은 `<output>/<job_id>/`에 저장됩니다. 작업이 `FAILED`, `CANCELLED`, 또는 `INTERRUPTED`로 끝나면 CLI는 결과 JSON을 출력하고 종료 코드 `1`을 반환합니다.
 
+서버가 structured API error를 반환하면 CLI는 해당 error `code`와 `message`를 stderr에 표시하고 종료 코드 `1`을 반환합니다.
+
 로그를 따라가는 동안 `Ctrl+C`를 누르면 CLI는 현재 원격 작업의 cancel endpoint를 호출하고 종료 코드 `130`으로 끝납니다.
 
 ### Python API client example

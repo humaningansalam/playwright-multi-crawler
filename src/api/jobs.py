@@ -279,7 +279,7 @@ async def _rollback_job_submission_inner(jobname: str, job_id: str, job_path: st
     state_removed = False
     try:
         await state.remove_job_state(job_id)
-        state_removed = await state.get_job_info(job_id) is None
+        state_removed = True
     except Exception:
         logging.exception("Failed to remove job state during rollback for %s.", job_id)
 
@@ -293,7 +293,7 @@ async def _rollback_job_submission_inner(jobname: str, job_id: str, job_path: st
     if not state_removed and directory_removed:
         try:
             await state.remove_job_state(job_id)
-            state_removed = await state.get_job_info(job_id) is None
+            state_removed = True
         except Exception:
             logging.exception("Failed to clear job state after rollback removed %s.", job_path)
 
@@ -479,11 +479,10 @@ async def submit_job_endpoint(
     },
 )
 async def cancel_job_endpoint(job_id: str):
-    job_info = await state.get_job_info(job_id)
-    if not job_info:
+    current_status = await state.get_job_status(job_id)
+    if current_status is None:
         _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
 
-    current_status = job_info.status
     if current_status.is_terminal:
         _raise_api_error(
             status.HTTP_409_CONFLICT,
@@ -492,35 +491,27 @@ async def cancel_job_endpoint(job_id: str):
             status=current_status.value,
         )
 
-    if current_status == JobStatus.PENDING and job_queue.cancel_job(job_id):
-        await state.update_job_status(
-            job_id,
-            JobStatus.CANCELLED,
-            JobError(code=JobErrorCode.JOB_CANCELLED, message="Job was cancelled"),
-        )
-        await state.remove_submitted_job(job_info.jobname)
-        return JobStatusResponse(job_id=job_id, status=JobStatus.CANCELLED)
-
-    cancellation_requested = await job_processor.cancel_running_job(job_id)
-    post_cancel_info = await state.get_job_info(job_id)
-    if not post_cancel_info:
-        _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
-    if post_cancel_info.status == JobStatus.CANCELLED:
-        return JobStatusResponse(job_id=job_id, status=JobStatus.CANCELLED)
-    if post_cancel_info.status.is_terminal or not cancellation_requested:
-        _raise_api_error(
-            status.HTTP_409_CONFLICT,
-            ApiErrorCode.JOB_ALREADY_TERMINAL,
-            "Job is already terminal",
-            status=post_cancel_info.status.value,
-        )
+    cancelled_from_queue = current_status == JobStatus.PENDING and job_queue.cancel_job(job_id)
+    if not cancelled_from_queue:
+        cancellation_requested = await job_processor.cancel_running_job(job_id)
+        post_cancel_status = await state.get_job_status(job_id)
+        if post_cancel_status is None:
+            _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
+        if post_cancel_status == JobStatus.CANCELLED:
+            return JobStatusResponse(job_id=job_id, status=JobStatus.CANCELLED)
+        if post_cancel_status.is_terminal or not cancellation_requested:
+            _raise_api_error(
+                status.HTTP_409_CONFLICT,
+                ApiErrorCode.JOB_ALREADY_TERMINAL,
+                "Job is already terminal",
+                status=post_cancel_status.value,
+            )
 
     await state.update_job_status(
         job_id,
         JobStatus.CANCELLED,
         JobError(code=JobErrorCode.JOB_CANCELLED, message="Job was cancelled"),
     )
-    await state.remove_submitted_job(post_cancel_info.jobname)
 
     return JobStatusResponse(job_id=job_id, status=JobStatus.CANCELLED)
 
