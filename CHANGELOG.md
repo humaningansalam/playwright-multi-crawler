@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.1] - 2026-08-15
+
+### Changed
+
+- Simplified job lifecycle state coordination and removed redundant recovery/result I/O.
+
+### Fixed
+
+- Made the crawler CLI show structured API error codes and messages instead of generic HTTP status failures.
+
 ## [0.3.0] - 2026-07-19
 
 ### Added
