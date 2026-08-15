@@ -33,8 +33,7 @@ class InvalidJobTransitionError(Exception):
 _job_status_and_results: Dict[str, JobRecord] = {}
 _submitted_jobs: Set[str] = set()
 
-_job_status_lock = asyncio.Lock()
-_submitted_jobs_lock = asyncio.Lock()
+_state_change_lock = asyncio.Lock()
 
 
 def _canonicalize_json_value(value: Any) -> Any:
@@ -277,28 +276,32 @@ def _load_recovery_candidate(state_path: Path) -> Optional[JobRecord]:
     )
 
 
-async def recover_persisted_jobs(job_root: str | Path) -> list[QueuedJob]:
-    root = Path(job_root)
+def _load_recovery_candidates(root: Path) -> Dict[str, JobRecord]:
     recovered: Dict[str, JobRecord] = {}
-    running_job_ids: Set[str] = set()
-
-    async with _job_status_lock:
-        async with _submitted_jobs_lock:
-            if _job_status_and_results or _submitted_jobs:
-                raise RuntimeError("Cannot recover persisted jobs into non-empty runtime registries")
-
     for job_dir in sorted(root.iterdir(), key=lambda path: path.name):
         if not job_dir.is_dir():
             continue
         state_path = job_dir / JOB_STATE_FILENAME
         if not state_path.exists():
             continue
-        record = await asyncio.to_thread(_load_recovery_candidate, state_path)
+        record = _load_recovery_candidate(state_path)
         if record is None:
             continue
         if record.job_id in recovered:
             raise RuntimeError(f"Duplicate recovered job ID: {record.job_id}")
         recovered[record.job_id] = record
+    return recovered
+
+
+async def recover_persisted_jobs(job_root: str | Path) -> list[QueuedJob]:
+    root = Path(job_root)
+    running_job_ids: Set[str] = set()
+
+    async with _state_change_lock:
+        if _job_status_and_results or _submitted_jobs:
+            raise RuntimeError("Cannot recover persisted jobs into non-empty runtime registries")
+
+    recovered = await asyncio.to_thread(_load_recovery_candidates, root)
 
     active_names: Set[str] = set()
     for record in recovered.values():
@@ -334,12 +337,11 @@ async def recover_persisted_jobs(job_root: str | Path) -> list[QueuedJob]:
     for job_id in sorted(running_job_ids):
         await asyncio.to_thread(_write_state_file_atomic, recovered[job_id])
 
-    async with _job_status_lock:
-        async with _submitted_jobs_lock:
-            if _job_status_and_results or _submitted_jobs:
-                raise RuntimeError("Cannot recover persisted jobs into non-empty runtime registries")
-            _job_status_and_results.update(recovered)
-            _submitted_jobs.update(active_names)
+    async with _state_change_lock:
+        if _job_status_and_results or _submitted_jobs:
+            raise RuntimeError("Cannot recover persisted jobs into non-empty runtime registries")
+        _job_status_and_results.update(recovered)
+        _submitted_jobs.update(active_names)
 
     pending_jobs = [
         QueuedJob(
@@ -359,31 +361,28 @@ async def recover_persisted_jobs(job_root: str | Path) -> list[QueuedJob]:
 
 
 async def get_job_info(job_id: str) -> Optional[JobRecord]:
-    async with _job_status_lock:
-        job_info = _job_status_and_results.get(job_id)
+    job_info = _job_status_and_results.get(job_id)
     if job_info is None:
         return None
     return await asyncio.to_thread(job_info.model_copy, deep=True)
 
 
 async def get_job_status(job_id: str) -> Optional[JobStatus]:
-    async with _job_status_lock:
-        job_info = _job_status_and_results.get(job_id)
-        return job_info.status if job_info else None
+    job_info = _job_status_and_results.get(job_id)
+    return job_info.status if job_info else None
 
 
 async def get_active_job_ids() -> Set[str]:
-    async with _job_status_lock:
-        return {
-            job_id
-            for job_id, job_info in _job_status_and_results.items()
-            if job_info.status.is_active
-        }
+    return {
+        job_id
+        for job_id, job_info in _job_status_and_results.items()
+        if job_info.status.is_active
+    }
 
 
 async def set_initial_status(job_id: str, job_name: str, job_path: str) -> None:
     async def commit() -> None:
-        async with _job_status_lock:
+        async with _state_change_lock:
             if job_id in _job_status_and_results:
                 logging.warning("Replacing existing state for job ID %s during initialization.", job_id)
             candidate = JobRecord(
@@ -409,7 +408,7 @@ async def update_job_status(
         raise TypeError("status must be a JobStatus")
 
     async def commit() -> bool:
-        async with _job_status_lock:
+        async with _state_change_lock:
             current = _job_status_and_results.get(job_id)
             if current is None:
                 logging.warning("Attempted to update status for non-existent job ID: %s", job_id)
@@ -421,6 +420,7 @@ async def update_job_status(
                 if not isinstance(result, JobError):
                     raise TypeError(f"{status.value} state requires a JobError result")
 
+            releases_job_name = current.status.is_active and status.is_terminal
             updates: Dict[str, Any] = {"status": status}
             transition_time = _now()
             if status == JobStatus.RUNNING and current.started_at is None:
@@ -448,6 +448,8 @@ async def update_job_status(
             candidate = current.model_copy(update=updates, deep=True)
             await asyncio.to_thread(_write_state_file_atomic, candidate)
             _job_status_and_results[job_id] = candidate
+            if releases_job_name:
+                _submitted_jobs.discard(current.jobname)
             logging.debug("Status updated for job %s: %s", job_id, status)
             return True
 
@@ -456,7 +458,7 @@ async def update_job_status(
 
 async def remove_job_state(job_id: str) -> None:
     async def commit() -> None:
-        async with _job_status_lock:
+        async with _state_change_lock:
             current = _job_status_and_results.get(job_id)
             if current is None:
                 return
@@ -468,7 +470,7 @@ async def remove_job_state(job_id: str) -> None:
 
 
 async def add_submitted_job(jobname: str) -> bool:
-    async with _submitted_jobs_lock:
+    async with _state_change_lock:
         if jobname in _submitted_jobs:
             logging.warning("Duplicate job submission detected for name: %s", jobname)
             return False
@@ -477,10 +479,9 @@ async def add_submitted_job(jobname: str) -> bool:
 
 
 async def remove_submitted_job(jobname: str) -> None:
-    async with _submitted_jobs_lock:
+    async with _state_change_lock:
         _submitted_jobs.discard(jobname)
 
 
 async def is_job_submitted(jobname: str) -> bool:
-    async with _submitted_jobs_lock:
-        return jobname in _submitted_jobs
+    return jobname in _submitted_jobs

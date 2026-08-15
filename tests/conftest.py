@@ -62,9 +62,8 @@ async def cleanup_job_state_and_folder():
     autouse=True 이므로 모든 테스트 함수에 자동으로 적용됩니다.
     """
     async def reset_test_state():
-        async with state_manager._job_status_lock:
+        async with state_manager._state_change_lock:
             state_manager._job_status_and_results.clear()
-        async with state_manager._submitted_jobs_lock:
             state_manager._submitted_jobs.clear()
 
         job_queue._queue = asyncio.Queue()

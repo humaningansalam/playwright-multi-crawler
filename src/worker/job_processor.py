@@ -244,8 +244,8 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
         if stderr_decoded:
             logging.warning(f"Job {job_id} stderr: {stderr_decoded}")
 
-        result_file = await _read_result_file(job_path)
         if timed_out:
+            result_file = await _read_result_file(job_path)
             final_status = JobStatus.FAILED
             loaded_result = result_file.result if result_file.state == ResultFileState.LOADED else None
             result_data = JobError(
@@ -266,30 +266,32 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
                 stderr=stderr_decoded,
                 exit_code=proc.returncode,
             )
-        elif result_file.state == ResultFileState.MISSING:
-            final_status = JobStatus.FAILED
-            result_data = JobError(
-                code=JobErrorCode.WORKER_RESULT_MISSING,
-                message="Worker did not produce a result file",
-                stdout=stdout_decoded,
-                stderr=stderr_decoded,
-            )
-        elif result_file.state == ResultFileState.INVALID:
-            final_status = JobStatus.FAILED
-            result_data = JobError(
-                code=JobErrorCode.WORKER_RESULT_INVALID,
-                message=result_file.message,
-                stdout=stdout_decoded,
-                stderr=stderr_decoded,
-            )
         else:
-            worker_result = result_file.result
-            if isinstance(worker_result, WorkerCompleted):
-                final_status = JobStatus.COMPLETED
-                result_data = worker_result.result
-            else:
+            result_file = await _read_result_file(job_path)
+            if result_file.state == ResultFileState.MISSING:
                 final_status = JobStatus.FAILED
-                result_data = worker_result.error
+                result_data = JobError(
+                    code=JobErrorCode.WORKER_RESULT_MISSING,
+                    message="Worker did not produce a result file",
+                    stdout=stdout_decoded,
+                    stderr=stderr_decoded,
+                )
+            elif result_file.state == ResultFileState.INVALID:
+                final_status = JobStatus.FAILED
+                result_data = JobError(
+                    code=JobErrorCode.WORKER_RESULT_INVALID,
+                    message=result_file.message,
+                    stdout=stdout_decoded,
+                    stderr=stderr_decoded,
+                )
+            else:
+                worker_result = result_file.result
+                if isinstance(worker_result, WorkerCompleted):
+                    final_status = JobStatus.COMPLETED
+                    result_data = worker_result.result
+                else:
+                    final_status = JobStatus.FAILED
+                    result_data = worker_result.error
 
     except asyncio.CancelledError:
         if stdout_task is not None and stderr_task is not None:
@@ -329,7 +331,6 @@ async def _process_job_internal(script_path: str, jobname: str, job_id: str):
             metrics.jobs_failed.inc()
 
         await state.update_job_status(job_id, final_status, result_data, duration, logs)
-        await state.remove_submitted_job(jobname)
 
 async def _dispatch_job(job: QueuedJob):
     """큐에서 작업을 받아 서브프로세스 실행"""
@@ -358,7 +359,6 @@ async def _dispatch_job(job: QueuedJob):
             JobStatus.FAILED,
             JobError(code=JobErrorCode.DISPATCH_FAILED, message=str(e)),
         )
-        await state.remove_submitted_job(jobname)
     finally:
         _running_job_tasks.pop(job_id, None)
 

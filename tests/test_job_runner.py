@@ -342,7 +342,6 @@ async def test_job_processor_runs_unbuffered_subprocess_in_job_directory_and_cle
     monkeypatch.setattr(job_processor, "_read_result_file", fake_read_result_file)
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
-    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_state_update)
 
     await job_processor._process_job_internal(str(script_path), "cwd-test", "job-1")
 
@@ -390,14 +389,10 @@ async def test_job_processor_force_cleans_group_when_log_persistence_fails(
     async def capture_state_update(*args, **kwargs):
         state_updates.append((args, kwargs))
 
-    async def ignore_remove_submitted_job(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(job_processor, "_stream_output_to_log", fail_log_persistence)
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", capture_state_update)
-    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_remove_submitted_job)
 
     await job_processor._process_job_internal(str(script_path), "log-failure", "job-1")
 
@@ -553,7 +548,7 @@ async def test_job_processor_reports_missing_result_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_job_processor_rejects_completed_result_from_nonzero_worker(monkeypatch, tmp_path):
+async def test_job_processor_reports_nonzero_exit_as_failure(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text("# test script\n", encoding="utf-8")
     state_updates = []
@@ -572,26 +567,15 @@ async def test_job_processor_rejects_completed_result_from_nonzero_worker(monkey
     async def fake_create_subprocess_exec(*_args, **_kwargs):
         return _FailedProcess()
 
-    async def fake_read_result_file(_job_path):
-        return job_processor.ResultFileRead(
-            job_processor.ResultFileState.LOADED,
-            WorkerCompleted(result={"ok": True}),
-        )
-
     async def capture_state_update(*args, **kwargs):
         state_updates.append((args, kwargs))
-
-    async def ignore_remove_submitted_job(*_args, **_kwargs):
-        return None
 
     async def fake_terminate(process, job_id, force=False):
         termination_calls.append((process, job_id, force))
 
     monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    monkeypatch.setattr(job_processor, "_read_result_file", fake_read_result_file)
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", capture_state_update)
-    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_remove_submitted_job)
 
     await job_processor._process_job_internal(str(script_path), "nonzero-worker", "job-1")
 
@@ -628,7 +612,6 @@ async def test_job_processor_counts_system_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(job_processor.metrics, "jobs_failed", failed)
     monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fail_create_subprocess_exec)
     monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
-    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_state_update)
 
     await job_processor._process_job_internal(str(script_path), "spawn-failure", "job-1")
 
@@ -765,7 +748,6 @@ async def test_job_processor_terminates_process_group_when_cancelled(monkeypatch
     monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
-    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_state_update)
 
     task = asyncio.create_task(job_processor._process_job_internal(str(script_path), "cancel-test", "job-1"))
     await wait_started.wait()
@@ -789,7 +771,6 @@ async def test_job_processor_finalizes_when_cancelled_during_running_transition(
     script_path.write_text("# test script\n", encoding="utf-8")
     running_update_started = asyncio.Event()
     state_updates = []
-    removed_job_names = []
 
     class _FakeGauge:
         def __init__(self):
@@ -813,13 +794,9 @@ async def test_job_processor_finalizes_when_cancelled_during_running_transition(
             running_update_started.set()
             await asyncio.Event().wait()
 
-    async def capture_removed_job(job_name):
-        removed_job_names.append(job_name)
-
     monkeypatch.setattr(job_processor.metrics, "active_jobs", active_jobs)
     monkeypatch.setattr(job_processor.metrics, "queued_jobs", queued_jobs)
     monkeypatch.setattr(job_processor.state, "update_job_status", block_running_update)
-    monkeypatch.setattr(job_processor.state, "remove_submitted_job", capture_removed_job)
 
     task = asyncio.create_task(
         job_processor._process_job_internal(str(script_path), "cancel-transition", "job-1")
@@ -833,7 +810,6 @@ async def test_job_processor_finalizes_when_cancelled_during_running_transition(
     assert active_jobs.value == 0
     assert state_updates[-1][0] == job_processor.JobStatus.CANCELLED
     assert state_updates[-1][1][0].code == JobErrorCode.JOB_CANCELLED
-    assert removed_job_names == ["cancel-transition"]
 
 
 @pytest.mark.asyncio
@@ -869,13 +845,9 @@ async def test_job_processor_retains_log_tails_when_cancelled(monkeypatch, tmp_p
     async def capture_state_update(*args, **kwargs):
         state_updates.append((args, kwargs))
 
-    async def ignore_remove_submitted_job(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", capture_state_update)
-    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_remove_submitted_job)
 
     task = asyncio.create_task(job_processor._process_job_internal(str(script_path), "cancel-logs", "job-1"))
     await wait_started.wait()
@@ -932,7 +904,6 @@ async def test_job_processor_uses_bounded_drain_when_cancelled(monkeypatch, tmp_
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor, "_drain_output_tasks", fake_drain)
     monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
-    monkeypatch.setattr(job_processor.state, "remove_submitted_job", ignore_state_update)
 
     task = asyncio.create_task(job_processor._process_job_internal(str(script_path), "cancel-drain", "job-1"))
     await wait_started.wait()

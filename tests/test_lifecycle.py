@@ -137,9 +137,8 @@ async def test_cancelled_job_remains_cancelled_after_recovery(tmp_path):
         duration=1.0,
     )
 
-    async with state._job_status_lock:
+    async with state._state_change_lock:
         state._job_status_and_results.clear()
-    async with state._submitted_jobs_lock:
         state._submitted_jobs.clear()
     assert await state.recover_persisted_jobs(tmp_path) == []
 
@@ -214,9 +213,8 @@ async def test_recovery_requeues_pending_and_interrupts_running_with_timestamps(
     await state.set_initial_status("running", "running_name", str(running_dir))
     await state.update_job_status("running", JobStatus.RUNNING)
 
-    async with state._job_status_lock:
+    async with state._state_change_lock:
         state._job_status_and_results.clear()
-    async with state._submitted_jobs_lock:
         state._submitted_jobs.clear()
     pending = await state.recover_persisted_jobs(tmp_path)
     job_queue.restore_jobs(pending)
