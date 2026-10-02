@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from src.common.download_paths import output_child
 from src.models.job import JOB_RESULTS_RESPONSE_ADAPTER, JobProcessingResponse, JobStatus
 
 
@@ -110,6 +111,7 @@ def fetch_result_and_download(
     job_id: str,
     output_dir: Path,
 ):
+    job_output = output_child(output_dir, job_id)
     response = client.get(_api_url(server, f"/api/jobs/results/{job_id}"))
     _raise_for_status(response)
     result = JOB_RESULTS_RESPONSE_ADAPTER.validate_python(response.json())
@@ -117,12 +119,12 @@ def fetch_result_and_download(
         raise CrawlerCliError("Log stream ended before the job reached a terminal state")
 
     if result.files:
-        job_output = output_dir / job_id
         job_output.mkdir(parents=True, exist_ok=True)
         for filename, path in result.files.items():
+            destination = output_child(job_output, filename)
             download = client.get(_download_url(server, path))
             _raise_for_status(download)
-            (job_output / filename).write_bytes(download.content)
+            destination.write_bytes(download.content)
     return result
 
 
