@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from pydantic import ValidationError
 
+from src.common.download_paths import output_child
 from src.models.job import (
     JOB_RESULTS_RESPONSE_ADAPTER,
     JobProcessingResponse,
@@ -169,12 +170,13 @@ def download_files(
     server: str = SERVER_URL,
     output_dir: Path = Path("downloads"),
 ) -> None:
-    job_output = output_dir / job_id
+    job_output = output_child(output_dir, job_id)
     job_output.mkdir(parents=True, exist_ok=True)
     for filename, path in files.items():
+        destination = output_child(job_output, filename)
         response = client.get(_download_url(server, path))
         response.raise_for_status()
-        (job_output / filename).write_bytes(response.content)
+        destination.write_bytes(response.content)
 
 
 def run(client: httpx.Client) -> int:
