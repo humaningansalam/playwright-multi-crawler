@@ -15,19 +15,23 @@ Playwright 기반 작업을 HTTP API로 제출하고, 공유 Chromium 브라우�
 - FastAPI
 - Uvicorn
 - Playwright
-- xserver-xephyr
+- Linux의 `Xephyr` 실행 파일 (`xserver-xephyr` 패키지)과 접근 가능한 부모 X 디스플레이 (`DISPLAY`)
 
 ## 설치 및 실행 방법
 
 ```bash
 # 패키지 설치
 uv sync
+# Debian/Ubuntu: Playwright 의존성과 별도로 Xephyr 설치
+sudo apt-get install xserver-xephyr
 uv run python -m playwright install-deps
 uv run python -m playwright install chromium
 
-# 서버 실행
+# X 세션의 터미널에서 서버 실행 (DISPLAY가 설정되어 있어야 함)
 uv run python -m src.main
 ```
+
+기본 full mode는 `pyvirtualdisplay`의 Xephyr backend를 사용합니다. Xephyr는 기존 X 디스플레이 안에서 실행되므로, GUI가 없는 서버에서는 별도의 부모 X 서버를 준비하고 해당 디스플레이에 접근할 수 있도록 `DISPLAY`를 설정해야 합니다. `DISPLAY` 값만 임의로 지정해도 X 서버가 만들어지지는 않습니다. Xephyr 실행 파일이나 부모 디스플레이가 없으면 서버 startup은 실패합니다.
 
 브라우저와 가상 디스플레이가 시작된 뒤에만 작업을 제출할 수 있습니다. 가벼운 import 또는 ASGI 테스트에는 다음처럼 heavy startup을 끌 수 있지만, 이 모드에서는 작업 제출이 의도적으로 `503 Service Unavailable`을 반환합니다.
 
@@ -118,6 +122,8 @@ uv run crawler example/crawl.py \
 ```
 
 `--file`은 필요한 만큼 반복할 수 있습니다. 완료된 파일은 `<output>/<job_id>/`에 저장됩니다. 작업이 `FAILED`, `CANCELLED`, 또는 `INTERRUPTED`로 끝나면 CLI는 결과 JSON을 출력하고 종료 코드 `1`을 반환합니다.
+
+CLI와 Python client example은 서버가 반환한 작업 ID와 파일명에 경로를 허용하지 않으며, 기존 심볼릭 링크를 통해 출력 폴더 밖으로 나가는 다운로드도 거부합니다.
 
 서버가 structured API error를 반환하면 CLI는 해당 error `code`와 `message`를 stderr에 표시하고 종료 코드 `1`을 반환합니다.
 
