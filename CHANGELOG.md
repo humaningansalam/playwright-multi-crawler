@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.4] - 2026-11-24
+
+### Fixed
+
+- Require Playwright 1.61 or newer for native Ubuntu 26.04 ARM64 browser installation; refresh the locked Playwright runtime.
+
 ## [0.4.3] - 2026-11-24
 
 ### Added
