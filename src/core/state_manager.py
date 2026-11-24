@@ -10,6 +10,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from src.core.private_jobs import (
+    LEGACY_TISTORY_JOB_NAME,
+    remove_legacy_tistory_credentials,
+    remove_private_inputs,
+)
 from src.models.job import (
     JOB_STATE_FILENAME,
     JOB_STATE_SCHEMA_VERSION,
@@ -86,6 +91,7 @@ def _build_persisted_state(job_record: JobRecord) -> PersistedJobStateV1:
     return PersistedJobStateV1(
         job_id=job_record.job_id,
         jobname=job_record.jobname,
+        access_token_sha256=job_record.access_token_sha256,
         status=job_record.status,
         result=persisted_result,
         logs=job_record.logs,
@@ -100,6 +106,8 @@ def _build_persisted_state(job_record: JobRecord) -> PersistedJobStateV1:
 
 def _serialize_persisted_state(job_record: JobRecord) -> bytes:
     state_payload = _build_persisted_state(job_record).model_dump(mode="json")
+    if job_record.access_token_sha256 is None:
+        state_payload.pop("access_token_sha256")
     serialized_state = json.dumps(
         state_payload,
         allow_nan=False,
@@ -329,6 +337,7 @@ def _load_recovery_candidate(state_path: Path) -> JobRecord | None:
         job_id=persisted_state.job_id,
         jobname=persisted_state.jobname,
         job_path=str(state_path.parent),
+        access_token_sha256=persisted_state.access_token_sha256,
         status=persisted_state.status,
         result=recovered_result,
         logs=persisted_state.logs,
@@ -344,15 +353,17 @@ def _load_recovery_candidate(state_path: Path) -> JobRecord | None:
 def _load_recovery_candidates(job_root: Path) -> dict[str, JobRecord]:
     recovered_records: dict[str, JobRecord] = {}
     for job_directory in sorted(job_root.iterdir(), key=lambda candidate: candidate.name):
-        if not job_directory.is_dir():
+        if job_directory.is_symlink() or not job_directory.is_dir():
             continue
 
         state_path = job_directory / JOB_STATE_FILENAME
         if not state_path.exists():
+            remove_private_inputs(job_directory)
             continue
 
         recovered_record = _load_recovery_candidate(state_path)
         if recovered_record is None:
+            remove_private_inputs(job_directory)
             continue
         if recovered_record.job_id in recovered_records:
             raise RuntimeError(f"Duplicate recovered job ID: {recovered_record.job_id}")
@@ -390,12 +401,21 @@ def _prepare_recovered_records(
     active_job_names: set[str] = set()
 
     for job_id, recovered_record in list(recovered_records.items()):
-        if recovered_record.status == JobStatus.RUNNING:
+        legacy_tistory_job = (
+            recovered_record.jobname == LEGACY_TISTORY_JOB_NAME
+            and recovered_record.access_token_sha256 is None
+        )
+        if legacy_tistory_job:
+            remove_legacy_tistory_credentials(recovered_record.job_path)
+        if recovered_record.status == JobStatus.RUNNING or (
+            legacy_tistory_job and recovered_record.status == JobStatus.PENDING
+        ):
             interrupted_job_ids.add(job_id)
             recovered_record = _interrupted_recovery_record(recovered_record)
             recovered_records[job_id] = recovered_record
 
         if recovered_record.status != JobStatus.PENDING:
+            remove_private_inputs(recovered_record.job_path)
             continue
         if recovered_record.jobname in active_job_names:
             raise RuntimeError(
@@ -414,7 +434,9 @@ async def recover_persisted_jobs(job_root: str | Path) -> list[QueuedJob]:
             raise RuntimeError("Cannot recover persisted jobs into non-empty runtime registries")
 
     recovered_records = await asyncio.to_thread(_load_recovery_candidates, root_path)
-    interrupted_job_ids, active_job_names = _prepare_recovered_records(recovered_records)
+    interrupted_job_ids, active_job_names = await asyncio.to_thread(
+        _prepare_recovered_records, recovered_records
+    )
 
     for job_id in sorted(interrupted_job_ids):
         await asyncio.to_thread(_write_state_file_atomic, recovered_records[job_id])
@@ -462,7 +484,9 @@ async def get_active_job_ids() -> set[str]:
     }
 
 
-async def set_initial_status(job_id: str, job_name: str, job_path: str) -> None:
+async def set_initial_status(
+    job_id: str, job_name: str, job_path: str, *, access_token_sha256: str | None = None
+) -> None:
     async def commit() -> None:
         async with _state_change_lock:
             if job_id in _job_status_and_results:
@@ -474,6 +498,7 @@ async def set_initial_status(job_id: str, job_name: str, job_path: str) -> None:
                 job_id=job_id,
                 jobname=job_name,
                 job_path=job_path,
+                access_token_sha256=access_token_sha256,
             )
             await asyncio.to_thread(_write_state_file_atomic, initial_record)
             _job_status_and_results[job_id] = initial_record
@@ -557,6 +582,8 @@ async def update_job_status(
                 ),
                 deep=True,
             )
+            if status.is_terminal:
+                await asyncio.to_thread(remove_private_inputs, current_record.job_path)
             await asyncio.to_thread(_write_state_file_atomic, updated_record)
             _job_status_and_results[job_id] = updated_record
 

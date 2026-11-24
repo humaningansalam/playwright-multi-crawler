@@ -10,16 +10,23 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 
 from src.common.metrics import metrics
 from src.config import JOB_FOLDER
 from src.core import job_queue, playwright_manager
 from src.core import state_manager as state
+from src.core.private_jobs import (
+    JOB_TOKEN_HEADER,
+    LEGACY_TISTORY_JOB_NAME,
+    PRIVATE_INPUT_DIRECTORY,
+    can_access_job,
+    token_digest,
+)
 from src.models.job import (
     JOB_STATE_FILENAME,
     ApiErrorCode,
@@ -50,7 +57,9 @@ RESERVED_JOB_FILENAMES = {
     "stdout.log",
     "stderr.log",
     JOB_STATE_FILENAME,
+    PRIVATE_INPUT_DIRECTORY,
 }
+JobToken = Annotated[str | None, Header(alias=JOB_TOKEN_HEADER)]
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 LOG_FILENAMES = ("stdout.log", "stderr.log")
 LOG_STREAM_CHUNK_CHARS = 64 * 1024
@@ -218,6 +227,12 @@ def _lookup_resolved_job_file(job_dir: Path, filename: str) -> JobFileLookup:
         return JobFileLookup(JobFileLookupState.MISSING, candidate)
     if not file_path.is_relative_to(job_dir):
         return JobFileLookup(JobFileLookupState.OUTSIDE_JOB, file_path)
+    relative_path = file_path.relative_to(job_dir)
+    if relative_path.parts and relative_path.parts[0] in {
+        PRIVATE_INPUT_DIRECTORY,
+        JOB_STATE_FILENAME,
+    }:
+        return JobFileLookup(JobFileLookupState.MISSING, file_path)
     if not file_path.is_file():
         return JobFileLookup(JobFileLookupState.MISSING, file_path)
     return JobFileLookup(JobFileLookupState.AVAILABLE, file_path)
@@ -260,7 +275,7 @@ def _list_job_files(job_path: str, base_download_url: str) -> dict[str, str] | N
         return None
     files = {}
     for filename in os.listdir(job_dir):
-        if filename == JOB_STATE_FILENAME:
+        if filename in {JOB_STATE_FILENAME, PRIVATE_INPUT_DIRECTORY}:
             continue
         lookup = _lookup_resolved_job_file(job_dir, filename)
         if lookup.state == JobFileLookupState.AVAILABLE:
@@ -367,6 +382,7 @@ async def _save_submission_files(
     job_path: str,
     script_file: UploadFile,
     additional_files: list[UploadFile],
+    private_files: list[UploadFile],
 ) -> str:
     script_path = os.path.join(job_path, "script.py")
     await _save_submission_upload(
@@ -394,6 +410,19 @@ async def _save_submission_files(
         )
         logger.info("Saved additional upload %s for job %s.", filename, job_id)
 
+    if private_files:
+        private_directory = Path(job_path) / PRIVATE_INPUT_DIRECTORY
+        await _run_file_operation(private_directory.mkdir, 0o700)
+        for private_file in private_files:
+            if not private_file.filename:
+                await private_file.close()
+                continue
+            destination = private_directory / private_file.filename
+            await _save_submission_upload(
+                private_file, str(destination), job_id=job_id, role="private"
+            )
+            await _run_file_operation(destination.chmod, 0o600)
+
     return script_path
 
 
@@ -402,6 +431,7 @@ def _validate_submission_request(
     jobname: str,
     script_file: UploadFile,
     additional_files: list[UploadFile],
+    private_files: list[UploadFile],
 ) -> None:
     if not jobname.strip() or script_file.filename is None:
         _raise_api_error(
@@ -418,7 +448,7 @@ def _validate_submission_request(
             "Job workers are unavailable",
         )
 
-    filename_violation = _validate_additional_filenames(additional_files)
+    filename_violation = _validate_additional_filenames(additional_files + private_files)
     if filename_violation is not None:
         _raise_api_error(
             status.HTTP_400_BAD_REQUEST,
@@ -426,6 +456,32 @@ def _validate_submission_request(
             "Additional file name is not allowed",
             filename=filename_violation.filename,
         )
+
+
+def _validate_private_submission(
+    jobname: str,
+    additional_files: list[UploadFile],
+    private_files: list[UploadFile],
+    job_token: str | None,
+) -> str | None:
+    digest = token_digest(job_token)
+    if (
+        job_token is not None or private_files or jobname == LEGACY_TISTORY_JOB_NAME
+    ) and digest is None:
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            ApiErrorCode.INVALID_SUBMISSION,
+            "Private jobs require a valid job access token",
+        )
+    if jobname == LEGACY_TISTORY_JOB_NAME and any(
+        upload.filename in {"config.json", "cookies.json"} for upload in additional_files
+    ):
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            ApiErrorCode.INVALID_SUBMISSION,
+            "Tistory account inputs must use private_files",
+        )
+    return digest
 
 
 async def _reserve_job_name(jobname: str) -> None:
@@ -446,6 +502,8 @@ async def _create_and_enqueue_job(
     job_path: str,
     script_file: UploadFile,
     additional_files: list[UploadFile],
+    private_files: list[UploadFile],
+    access_token_sha256: str | None,
 ) -> None:
     await _run_file_operation(_create_job_path, job_path)
     logger.info("Accepted job %s (%s); storing inputs in %s.", jobname, job_id, job_path)
@@ -454,8 +512,14 @@ async def _create_and_enqueue_job(
         job_path,
         script_file,
         additional_files,
+        private_files,
     )
-    await state.set_initial_status(job_id, jobname, job_path)
+    if access_token_sha256 is None:
+        await state.set_initial_status(job_id, jobname, job_path)
+    else:
+        await state.set_initial_status(
+            job_id, jobname, job_path, access_token_sha256=access_token_sha256
+        )
     await job_queue.add_job(QueuedJob(script_path=script_path, jobname=jobname, job_id=job_id))
 
 
@@ -466,6 +530,8 @@ async def _prepare_submission_with_rollback(
     job_path: str,
     script_file: UploadFile,
     additional_files: list[UploadFile],
+    private_files: list[UploadFile],
+    access_token_sha256: str | None,
 ) -> None:
     try:
         await _create_and_enqueue_job(
@@ -474,6 +540,8 @@ async def _prepare_submission_with_rollback(
             job_path=job_path,
             script_file=script_file,
             additional_files=additional_files,
+            private_files=private_files,
+            access_token_sha256=access_token_sha256,
         )
     except asyncio.CancelledError:
         await _rollback_job_submission(jobname, job_id, job_path)
@@ -496,6 +564,11 @@ async def _prepare_submission_with_rollback(
         )
 
 
+@router.get("/capabilities")
+async def get_job_capabilities() -> dict[str, int]:
+    return {"private_jobs": 1}
+
+
 @router.post(
     "/submit",
     status_code=status.HTTP_202_ACCEPTED,
@@ -513,9 +586,15 @@ async def submit_job_endpoint(
     jobname: str = Form(...),
     script_file: UploadFile = File(...),
     additional_files: list[UploadFile] = File(default=[]),
+    private_files: Annotated[list[UploadFile] | None, File()] = None,
+    job_token: JobToken = None,
 ) -> JobSubmitResponse:
     """Validate, persist, and enqueue a new crawler job."""
-    _validate_submission_request(request, jobname, script_file, additional_files)
+    private_uploads = private_files or []
+    access_token_sha256 = _validate_private_submission(
+        jobname, additional_files, private_uploads, job_token
+    )
+    _validate_submission_request(request, jobname, script_file, additional_files, private_uploads)
     await _reserve_job_name(jobname)
 
     job_id = str(uuid.uuid4())
@@ -526,11 +605,22 @@ async def submit_job_endpoint(
         job_path=job_path,
         script_file=script_file,
         additional_files=additional_files,
+        private_files=private_uploads,
+        access_token_sha256=access_token_sha256,
     )
 
     metrics.jobs_submitted.inc()
     logger.info("Queued job %s (%s).", jobname, job_id)
     return JobSubmitResponse(job_id=job_id)
+
+
+async def _get_accessible_job(job_id: str, job_token: str | None) -> JobRecord:
+    job_record = await state.get_job_info(job_id)
+    if job_record is None or not can_access_job(
+        job_record.jobname, job_record.access_token_sha256, job_token
+    ):
+        _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
+    return job_record
 
 
 @router.post(
@@ -542,10 +632,9 @@ async def submit_job_endpoint(
         409: _error_response("Job is already terminal"),
     },
 )
-async def cancel_job_endpoint(job_id: str) -> JobStatusResponse:
-    current_status = await state.get_job_status(job_id)
-    if current_status is None:
-        _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
+async def cancel_job_endpoint(job_id: str, job_token: JobToken = None) -> JobStatusResponse:
+    job_record = await _get_accessible_job(job_id, job_token)
+    current_status = job_record.status
 
     if current_status.is_terminal:
         _raise_api_error(
@@ -586,11 +675,9 @@ async def cancel_job_endpoint(job_id: str) -> JobStatusResponse:
     response_model_exclude_none=True,
     responses={404: _error_response("Job not found")},
 )
-async def get_job_status_endpoint(job_id: str) -> JobStatusResponse:
+async def get_job_status_endpoint(job_id: str, job_token: JobToken = None) -> JobStatusResponse:
     """Return the current lifecycle status for one job."""
-    job_record = await state.get_job_info(job_id)
-    if job_record is None:
-        _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
+    job_record = await _get_accessible_job(job_id, job_token)
     return JobStatusResponse(
         job_id=job_id,
         status=job_record.status,
@@ -652,11 +739,9 @@ def _build_terminal_result_response(
     response_model=JobResultsResponse,
     responses={404: _error_response("Job not found")},
 )
-async def get_job_results_endpoint(job_id: str) -> JobResultsResponse:
+async def get_job_results_endpoint(job_id: str, job_token: JobToken = None) -> JobResultsResponse:
     """Return progress for an active job or its terminal result and files."""
-    job_record = await state.get_job_info(job_id)
-    if job_record is None:
-        _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
+    job_record = await _get_accessible_job(job_id, job_token)
 
     if job_record.status.is_active:
         return JobProcessingResponse(
@@ -714,10 +799,8 @@ async def _stream_job_logs(job_id: str, job_path: str) -> AsyncIterator[str]:
         404: _error_response("Job not found"),
     },
 )
-async def stream_job_logs_endpoint(job_id: str) -> StreamingResponse:
-    job_record = await state.get_job_info(job_id)
-    if job_record is None:
-        _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
+async def stream_job_logs_endpoint(job_id: str, job_token: JobToken = None) -> StreamingResponse:
+    job_record = await _get_accessible_job(job_id, job_token)
 
     return StreamingResponse(
         _stream_job_logs(job_id, job_record.job_path),
@@ -761,6 +844,7 @@ def _build_download_response(opened_job_file: OpenedJobFile, filename: str) -> F
             media_type="application/octet-stream",
             filename=filename,
             stat_result=opened_job_file.stat_result,
+            headers={"Cache-Control": "no-store"},
         )
     except BaseException:
         os.close(opened_job_file.file_descriptor)
@@ -781,13 +865,13 @@ def _build_download_response(opened_job_file: OpenedJobFile, filename: str) -> F
         404: _error_response("Job or file not found"),
     },
 )
-async def download_file_endpoint(job_id: str, filename: str) -> FileResponse:
+async def download_file_endpoint(
+    job_id: str, filename: str, job_token: JobToken = None
+) -> FileResponse:
     """Return one validated regular file from a job directory."""
-    job_record = await state.get_job_info(job_id)
-    if job_record is None:
-        _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
+    job_record = await _get_accessible_job(job_id, job_token)
 
-    if filename == JOB_STATE_FILENAME:
+    if filename in {JOB_STATE_FILENAME, PRIVATE_INPUT_DIRECTORY}:
         _raise_api_error(
             status.HTTP_404_NOT_FOUND,
             ApiErrorCode.FILE_NOT_FOUND,

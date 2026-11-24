@@ -84,6 +84,7 @@ class JobRecord(BaseModel):
     job_id: str
     jobname: str
     job_path: str
+    access_token_sha256: str | None = Field(default=None, repr=False, pattern=r"^[0-9a-f]{64}$")
     status: JobStatus = JobStatus.PENDING
     result: Any = None
     logs: dict[str, str] | None = None
@@ -105,6 +106,7 @@ class PersistedJobStateV1(BaseModel):
     schema_version: Literal[1] = JOB_STATE_SCHEMA_VERSION
     job_id: str
     jobname: str
+    access_token_sha256: str | None = Field(default=None, repr=False, pattern=r"^[0-9a-f]{64}$")
     status: JobStatus
     result: Any = None
     logs: dict[str, str] | None = None
