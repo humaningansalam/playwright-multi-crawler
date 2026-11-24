@@ -5,7 +5,8 @@ import signal
 import pytest
 
 from src import main as main_module
-from src.core import job_queue, playwright_manager, state_manager as state
+from src.core import job_queue, playwright_manager
+from src.core import state_manager as state
 from src.models.job import JobError, JobErrorCode, JobStatus, WorkerCompleted
 from src.worker import job_processor
 
@@ -181,13 +182,19 @@ async def test_browser_loss_uses_non_draining_shutdown(monkeypatch):
     monkeypatch.setattr(main_module.state_manager, "recover_persisted_jobs", recover)
     monkeypatch.setattr(main_module.job_queue, "restore_jobs", lambda _jobs: None)
     monkeypatch.setattr(main_module.tool_utils, "start_display", lambda: True)
-    monkeypatch.setattr(main_module.tool_utils, "stop_display", lambda: calls.append("display_stop"))
+    monkeypatch.setattr(
+        main_module.tool_utils, "stop_display", lambda: calls.append("display_stop")
+    )
     monkeypatch.setattr(main_module.playwright_manager, "start", browser_start)
     monkeypatch.setattr(main_module.playwright_manager, "shutdown", browser_shutdown)
-    monkeypatch.setattr(main_module.job_processor, "start_workers", lambda: calls.append("workers_start"))
+    monkeypatch.setattr(
+        main_module.job_processor, "start_workers", lambda: calls.append("workers_start")
+    )
     monkeypatch.setattr(main_module.job_processor, "stop_workers", stop_workers)
     monkeypatch.setattr(main_module.tool_utils, "periodic_cleanup", lambda: asyncio.sleep(0))
-    monkeypatch.setattr(playwright_manager, "_signal_process", lambda pid, sig: calls.append((pid, sig)))
+    monkeypatch.setattr(
+        playwright_manager, "_signal_process", lambda pid, sig: calls.append((pid, sig))
+    )
     monkeypatch.setattr(playwright_manager, "_shutting_down", False)
     monkeypatch.setattr(playwright_manager, "_requested_exit_code", None)
     monkeypatch.setenv("RUN_HEAVY_STARTUP", "true")

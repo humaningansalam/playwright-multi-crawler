@@ -1,16 +1,15 @@
-from pathlib import Path
 import asyncio
 import json
 import os
 import signal
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
-from src.worker import job_runner
-from src.worker import job_processor
-from src.models.job import JobError, JobErrorCode, QueuedJob, WorkerCompleted
+from src.models.job import JobErrorCode, QueuedJob, WorkerCompleted
+from src.worker import job_processor, job_runner
 
 
 def _stream(data: bytes = b"") -> asyncio.StreamReader:
@@ -76,8 +75,7 @@ class _FakePlaywright:
 async def test_job_runner_does_not_close_shared_cdp_browser(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text(
-        "async def crawl(page, context, job_path):\n"
-        "    return {'ok': True}\n",
+        "async def crawl(page, context, job_path):\n    return {'ok': True}\n",
         encoding="utf-8",
     )
     browser = _FakeBrowser()
@@ -97,8 +95,7 @@ async def test_job_runner_does_not_close_shared_cdp_browser(monkeypatch, tmp_pat
 async def test_job_runner_keeps_shared_browser_open_when_crawl_fails(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text(
-        "async def crawl(page, context, job_path):\n"
-        "    raise RuntimeError('boom')\n",
+        "async def crawl(page, context, job_path):\n    raise RuntimeError('boom')\n",
         encoding="utf-8",
     )
     browser = _FakeBrowser()
@@ -117,8 +114,7 @@ async def test_job_runner_keeps_shared_browser_open_when_crawl_fails(monkeypatch
 async def test_job_runner_records_system_exit_as_failed(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text(
-        "async def crawl(page, context, job_path):\n"
-        "    raise SystemExit(7)\n",
+        "async def crawl(page, context, job_path):\n    raise SystemExit(7)\n",
         encoding="utf-8",
     )
     browser = _FakeBrowser()
@@ -137,8 +133,7 @@ async def test_job_runner_records_system_exit_as_failed(monkeypatch, tmp_path):
 async def test_job_runner_writes_result_when_page_cleanup_fails(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text(
-        "async def crawl(page, context, job_path):\n"
-        "    return {'ok': True}\n",
+        "async def crawl(page, context, job_path):\n    return {'ok': True}\n",
         encoding="utf-8",
     )
     browser = _FakeBrowser()
@@ -164,8 +159,7 @@ async def test_job_runner_writes_result_when_page_cleanup_fails(monkeypatch, tmp
 async def test_job_runner_writes_result_when_context_cleanup_fails(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text(
-        "async def crawl(page, context, job_path):\n"
-        "    return {'ok': True}\n",
+        "async def crawl(page, context, job_path):\n    return {'ok': True}\n",
         encoding="utf-8",
     )
     browser = _FakeBrowser()
@@ -192,8 +186,7 @@ async def test_job_runner_imports_helper_from_job_directory(monkeypatch, tmp_pat
     helper_module = "job_helper_for_import_test"
     script_path = tmp_path / "script.py"
     (tmp_path / f"{helper_module}.py").write_text(
-        "def value():\n"
-        "    return 'from helper'\n",
+        "def value():\n    return 'from helper'\n",
         encoding="utf-8",
     )
     script_path.write_text(
@@ -213,11 +206,46 @@ async def test_job_runner_imports_helper_from_job_directory(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_job_runner_registers_dynamic_module_for_runtime_type_resolution(
+    monkeypatch,
+    tmp_path,
+):
+    script_path = tmp_path / "script.py"
+    script_path.write_text(
+        "from __future__ import annotations\n\n"
+        "from dataclasses import dataclass\n"
+        "from typing import get_type_hints\n\n"
+        "@dataclass\n"
+        "class Payload:\n"
+        "    child: Payload | None = None\n\n"
+        "async def crawl(page, context, job_path):\n"
+        "    return {'child_type': str(get_type_hints(Payload)['child'])}\n",
+        encoding="utf-8",
+    )
+    browser = _FakeBrowser()
+    module_name = "crawler_job_type_resolution_job"
+    sys.modules.pop(module_name, None)
+    monkeypatch.setattr(job_runner, "async_playwright", lambda: _FakePlaywright(browser))
+
+    try:
+        await job_runner.run_user_script(
+            "type-resolution-job",
+            str(script_path),
+            str(tmp_path),
+        )
+    finally:
+        sys.modules.pop(module_name, None)
+
+    result = json.loads((tmp_path / job_runner.RESULT_FILENAME).read_text(encoding="utf-8"))
+    assert result["status"] == "COMPLETED"
+    assert "Payload" in result["result"]["child_type"]
+
+
+@pytest.mark.asyncio
 async def test_job_runner_preserves_user_data_named_error(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text(
-        "async def crawl(page, context, job_path):\n"
-        "    return {'error': 'this is user data'}\n",
+        "async def crawl(page, context, job_path):\n    return {'error': 'this is user data'}\n",
         encoding="utf-8",
     )
     browser = _FakeBrowser()
@@ -237,8 +265,7 @@ async def test_job_runner_preserves_user_data_named_error(monkeypatch, tmp_path)
 async def test_job_runner_rejects_non_json_result_without_leaving_temp_file(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text(
-        "async def crawl(page, context, job_path):\n"
-        "    return object()\n",
+        "async def crawl(page, context, job_path):\n    return object()\n",
         encoding="utf-8",
     )
     browser = _FakeBrowser()
@@ -264,8 +291,7 @@ async def test_job_runner_rejects_non_json_result_without_leaving_temp_file(monk
 async def test_job_runner_rejects_lossy_json_coercion(monkeypatch, tmp_path, result_expression):
     script_path = tmp_path / "script.py"
     script_path.write_text(
-        "async def crawl(page, context, job_path):\n"
-        f"    return {result_expression}\n",
+        f"async def crawl(page, context, job_path):\n    return {result_expression}\n",
         encoding="utf-8",
     )
     browser = _FakeBrowser()
@@ -282,8 +308,7 @@ async def test_job_runner_rejects_lossy_json_coercion(monkeypatch, tmp_path, res
 async def test_job_runner_normalizes_tuple_result_to_json_array(monkeypatch, tmp_path):
     script_path = tmp_path / "script.py"
     script_path.write_text(
-        "async def crawl(page, context, job_path):\n"
-        "    return (1, {'ok': True})\n",
+        "async def crawl(page, context, job_path):\n    return (1, {'ok': True})\n",
         encoding="utf-8",
     )
     browser = _FakeBrowser()
@@ -338,7 +363,9 @@ async def test_job_processor_runs_unbuffered_subprocess_in_job_directory_and_cle
     async def fake_terminate(process, job_id, force=False):
         termination_calls.append((process, job_id, force))
 
-    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
     monkeypatch.setattr(job_processor, "_read_result_file", fake_read_result_file)
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
@@ -389,7 +416,9 @@ async def test_job_processor_force_cleans_group_when_log_persistence_fails(
     async def capture_state_update(*args, **kwargs):
         state_updates.append((args, kwargs))
 
-    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
     monkeypatch.setattr(job_processor, "_stream_output_to_log", fail_log_persistence)
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", capture_state_update)
@@ -573,7 +602,9 @@ async def test_job_processor_reports_nonzero_exit_as_failure(monkeypatch, tmp_pa
     async def fake_terminate(process, job_id, force=False):
         termination_calls.append((process, job_id, force))
 
-    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", capture_state_update)
 
@@ -610,7 +641,9 @@ async def test_job_processor_counts_system_failure(monkeypatch, tmp_path):
 
     monkeypatch.setattr(job_processor.metrics, "jobs_completed", completed)
     monkeypatch.setattr(job_processor.metrics, "jobs_failed", failed)
-    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fail_create_subprocess_exec)
+    monkeypatch.setattr(
+        job_processor.asyncio, "create_subprocess_exec", fail_create_subprocess_exec
+    )
     monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
 
     await job_processor._process_job_internal(str(script_path), "spawn-failure", "job-1")
@@ -745,11 +778,15 @@ async def test_job_processor_terminates_process_group_when_cancelled(monkeypatch
     async def ignore_state_update(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
 
-    task = asyncio.create_task(job_processor._process_job_internal(str(script_path), "cancel-test", "job-1"))
+    task = asyncio.create_task(
+        job_processor._process_job_internal(str(script_path), "cancel-test", "job-1")
+    )
     await wait_started.wait()
     task.cancel()
 
@@ -845,11 +882,15 @@ async def test_job_processor_retains_log_tails_when_cancelled(monkeypatch, tmp_p
     async def capture_state_update(*args, **kwargs):
         state_updates.append((args, kwargs))
 
-    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor.state, "update_job_status", capture_state_update)
 
-    task = asyncio.create_task(job_processor._process_job_internal(str(script_path), "cancel-logs", "job-1"))
+    task = asyncio.create_task(
+        job_processor._process_job_internal(str(script_path), "cancel-logs", "job-1")
+    )
     await wait_started.wait()
     task.cancel()
 
@@ -900,12 +941,16 @@ async def test_job_processor_uses_bounded_drain_when_cancelled(monkeypatch, tmp_
     async def ignore_state_update(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        job_processor.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
     monkeypatch.setattr(job_processor, "_terminate_process", fake_terminate)
     monkeypatch.setattr(job_processor, "_drain_output_tasks", fake_drain)
     monkeypatch.setattr(job_processor.state, "update_job_status", ignore_state_update)
 
-    task = asyncio.create_task(job_processor._process_job_internal(str(script_path), "cancel-drain", "job-1"))
+    task = asyncio.create_task(
+        job_processor._process_job_internal(str(script_path), "cancel-drain", "job-1")
+    )
     await wait_started.wait()
     task.cancel()
 

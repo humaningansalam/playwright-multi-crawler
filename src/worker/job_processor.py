@@ -1,32 +1,33 @@
 import asyncio
-import logging
-import time
-import os
-import sys
 import json
+import logging
+import os
 import signal
+import sys
+import time
 import traceback
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, BinaryIO
 
 from pydantic import ValidationError
 
-from src.core import state_manager as state
-from src.core import job_queue
-from src.config import MAX_CONCURRENT_TASKS, PROJECT_ROOT, JOB_TIMEOUT_SECONDS
 from src.common.metrics import metrics
+from src.config import JOB_TIMEOUT_SECONDS, MAX_CONCURRENT_TASKS, PROJECT_ROOT
+from src.core import job_queue
+from src.core import state_manager as state
 from src.models.job import (
+    WORKER_RESULT_ADAPTER,
     JobError,
     JobErrorCode,
     JobStatus,
     QueuedJob,
-    WORKER_RESULT_ADAPTER,
     WorkerCompleted,
     WorkerResult,
 )
 
-# 워커 스크립트의 절대 경로
+logger = logging.getLogger(__name__)
+
 JOB_RUNNER_PATH = os.path.join(PROJECT_ROOT, "src", "worker", "job_runner.py")
 RESULT_FILENAME = "result.json"
 STDOUT_LOG_FILENAME = "stdout.log"
@@ -35,8 +36,8 @@ LOG_READ_CHUNK_BYTES = 64 * 1024
 LOG_TAIL_BYTES = 64 * 1024
 LOG_DRAIN_TIMEOUT_SECONDS = 5.0
 
-_workers: List[asyncio.Task] = []
-_running_job_tasks: Dict[str, asyncio.Task] = {}
+_workers: list[asyncio.Task[None]] = []
+_running_job_tasks: dict[str, asyncio.Task[None]] = {}
 
 
 class ResultFileState(str, Enum):
@@ -52,6 +53,27 @@ class ResultFileRead:
     message: str = ""
 
 
+@dataclass(frozen=True)
+class JobExecutionOutcome:
+    status: JobStatus
+    result: Any
+
+
+@dataclass(frozen=True)
+class WorkerProcessContext:
+    process: asyncio.subprocess.Process
+    stdout_task: asyncio.Task[str]
+    stderr_task: asyncio.Task[str]
+
+
+@dataclass(frozen=True)
+class WorkerProcessOutput:
+    return_code: int | None
+    timed_out: bool
+    stdout_tail: str
+    stderr_tail: str
+
+
 async def _run_file_operation(function, *args):
     operation = asyncio.create_task(asyncio.to_thread(function, *args))
     try:
@@ -60,7 +82,7 @@ async def _run_file_operation(function, *args):
         try:
             await operation
         except Exception:
-            logging.exception("File operation failed while job cancellation was pending.")
+            logger.exception("File operation failed while job cancellation was pending.")
         raise cancellation
 
 
@@ -72,17 +94,17 @@ async def _open_file(*args, **kwargs):
         try:
             opened_file = await operation
         except Exception:
-            logging.exception("File open failed while job cancellation was pending.")
+            logger.exception("File open failed while job cancellation was pending.")
         else:
             try:
                 await asyncio.to_thread(opened_file.close)
             except Exception:
-                logging.exception("Failed to close file opened during job cancellation.")
+                logger.exception("Failed to close file opened during job cancellation.")
         raise cancellation
 
 
 def _load_result_file(result_path: str) -> object:
-    with open(result_path, "r", encoding="utf-8") as result_file:
+    with open(result_path, encoding="utf-8") as result_file:
         return json.load(result_file)
 
 
@@ -90,18 +112,22 @@ async def _read_result_file(job_path: str) -> ResultFileRead:
     result_path = os.path.join(job_path, RESULT_FILENAME)
     try:
         payload = await _run_file_operation(_load_result_file, result_path)
-        return ResultFileRead(
-            ResultFileState.LOADED,
-            result=WORKER_RESULT_ADAPTER.validate_python(payload),
-        )
+        worker_result = WORKER_RESULT_ADAPTER.validate_python(payload)
     except FileNotFoundError:
         return ResultFileRead(ResultFileState.MISSING)
-    except (OSError, json.JSONDecodeError, ValidationError) as exc:
-        logging.error("Failed to read valid %s in %s: %s", RESULT_FILENAME, job_path, exc)
-        return ResultFileRead(ResultFileState.INVALID, message=str(exc))
+    except (OSError, json.JSONDecodeError, ValidationError) as exception:
+        logger.error(
+            "Failed to read a valid %s from %s: %s",
+            RESULT_FILENAME,
+            job_path,
+            exception,
+        )
+        return ResultFileRead(ResultFileState.INVALID, message=str(exception))
+
+    return ResultFileRead(ResultFileState.LOADED, result=worker_result)
 
 
-def _write_log_chunk(log_file, chunk: bytes) -> None:
+def _write_log_chunk(log_file: BinaryIO, chunk: bytes) -> None:
     log_file.write(chunk)
     log_file.flush()
 
@@ -119,255 +145,418 @@ async def _stream_output_to_log(stream: asyncio.StreamReader, path: str) -> str:
         try:
             await _run_file_operation(log_file.close)
         except Exception:
-            logging.exception("Failed to close job log while another error was pending.")
+            logger.exception("Failed to close a job log while another error was pending.")
         raise
     else:
         await _run_file_operation(log_file.close)
+
     return tail.decode("utf-8", errors="replace")
 
 
-async def _terminate_process(proc: asyncio.subprocess.Process, job_id: str, force: bool = False) -> None:
-    logging.warning(f"Terminating job subprocess group for {job_id}.")
+async def _terminate_process(
+    process: asyncio.subprocess.Process,
+    job_id: str,
+    force: bool = False,
+) -> None:
+    signal_to_send = signal.SIGKILL if force else signal.SIGTERM
+    logger.warning("Terminating subprocess group for job %s with %s.", job_id, signal_to_send.name)
+
     try:
         if os.name == "posix":
-            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
-        else:
-            if proc.returncode is not None:
-                return
-            if force:
-                proc.kill()
-            else:
-                proc.terminate()
+            os.killpg(process.pid, signal_to_send)
+        elif process.returncode is None:
+            process.kill() if force else process.terminate()
     except ProcessLookupError:
         return
 
-    if proc.returncode is not None:
+    if process.returncode is not None:
         return
+
     try:
-        await asyncio.wait_for(proc.wait(), timeout=5.0)
+        await asyncio.wait_for(process.wait(), timeout=5.0)
     except asyncio.TimeoutError:
-        logging.warning(f"Job {job_id} did not exit after SIGTERM. Killing subprocess group.")
+        logger.warning("Job %s did not exit after SIGTERM; killing its subprocess group.", job_id)
         try:
             if os.name == "posix":
-                os.killpg(proc.pid, signal.SIGKILL)
+                os.killpg(process.pid, signal.SIGKILL)
             else:
-                proc.kill()
+                process.kill()
         except ProcessLookupError:
             return
-        await proc.wait()
+        await process.wait()
 
 
 async def _drain_output_tasks(
-    stdout_task: asyncio.Task,
-    stderr_task: asyncio.Task,
-    proc: asyncio.subprocess.Process,
+    stdout_task: asyncio.Task[str],
+    stderr_task: asyncio.Task[str],
+    process: asyncio.subprocess.Process,
     job_id: str,
 ) -> tuple[str, str]:
     output_tasks = asyncio.gather(stdout_task, stderr_task)
     try:
-        output = await asyncio.wait_for(asyncio.shield(output_tasks), timeout=LOG_DRAIN_TIMEOUT_SECONDS)
+        output = await asyncio.wait_for(
+            asyncio.shield(output_tasks),
+            timeout=LOG_DRAIN_TIMEOUT_SECONDS,
+        )
     except asyncio.TimeoutError:
-        logging.warning(f"Job {job_id} output pipes did not close; killing its process group.")
-        await _terminate_process(proc, job_id, force=True)
+        logger.warning("Output pipes for job %s did not close; killing its process group.", job_id)
+        await _terminate_process(process, job_id, force=True)
         output = await asyncio.wait_for(output_tasks, timeout=LOG_DRAIN_TIMEOUT_SECONDS)
     return tuple(output)
 
 
-async def _process_job_internal(script_path: str, jobname: str, job_id: str):
-    """서브프로세스를 통해 작업을 격리 실행"""
-    metrics.active_jobs.inc()
+def _timeout_error(
+    result_file: ResultFileRead,
+    stdout_tail: str,
+    stderr_tail: str,
+) -> JobError:
+    loaded_result = result_file.result if result_file.state == ResultFileState.LOADED else None
+    return JobError(
+        code=JobErrorCode.WORKER_TIMED_OUT,
+        message="Worker exceeded its execution timeout",
+        stdout=stdout_tail,
+        stderr=stderr_tail,
+        timeout_seconds=JOB_TIMEOUT_SECONDS,
+        worker_result=(
+            loaded_result.result if isinstance(loaded_result, WorkerCompleted) else None
+        ),
+        worker_error=(
+            loaded_result.error
+            if loaded_result is not None and not isinstance(loaded_result, WorkerCompleted)
+            else None
+        ),
+    )
 
-    start_time = time.time()
-    logging.info(f"Starting job '{jobname}' (ID: {job_id}) via subprocess")
-    
+
+async def _start_worker_process(
+    script_path: str,
+    job_id: str,
+) -> WorkerProcessContext:
     job_path = os.path.dirname(script_path)
-    
-    # 실행할 명령어: python src/core/job_runner.py <id> <script> <path>
-    cmd = [
+    worker_command = [
         sys.executable,
         "-u",
         JOB_RUNNER_PATH,
         job_id,
         script_path,
-        job_path
+        job_path,
     ]
+    subprocess_options: dict[str, Any] = {
+        "cwd": job_path,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+    }
+    if os.name == "posix":
+        subprocess_options["start_new_session"] = True
 
-    final_status = JobStatus.FAILED
-    result_data = None
-    stdout_decoded = ""
-    stderr_decoded = ""
-    logs: Optional[Dict[str, str]] = None
+    process = await asyncio.create_subprocess_exec(
+        *worker_command,
+        **subprocess_options,
+    )
+    if process.stdout is None or process.stderr is None:
+        await _terminate_process(process, job_id, force=True)
+        raise RuntimeError("Worker subprocess pipes were not created")
+
+    return WorkerProcessContext(
+        process=process,
+        stdout_task=asyncio.create_task(
+            _stream_output_to_log(
+                process.stdout,
+                os.path.join(job_path, STDOUT_LOG_FILENAME),
+            )
+        ),
+        stderr_task=asyncio.create_task(
+            _stream_output_to_log(
+                process.stderr,
+                os.path.join(job_path, STDERR_LOG_FILENAME),
+            )
+        ),
+    )
+
+
+async def _wait_for_worker_process(
+    process_context: WorkerProcessContext,
+    job_id: str,
+) -> WorkerProcessOutput:
+    process = process_context.process
     timed_out = False
-    proc: Optional[asyncio.subprocess.Process] = None
-    stdout_task: Optional[asyncio.Task] = None
-    stderr_task: Optional[asyncio.Task] = None
+    try:
+        try:
+            await asyncio.wait_for(process.wait(), timeout=JOB_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            timed_out = True
+            await _terminate_process(process, job_id)
+        except asyncio.CancelledError:
+            await _terminate_process(process, job_id)
+            raise
+
+        stdout_tail, stderr_tail = await _drain_output_tasks(
+            process_context.stdout_task,
+            process_context.stderr_task,
+            process,
+            job_id,
+        )
+    finally:
+        # A descendant can outlive the direct runner while still holding the process group.
+        await _terminate_process(process, job_id, force=True)
+
+    return WorkerProcessOutput(
+        return_code=process.returncode,
+        timed_out=timed_out,
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+    )
+
+
+def _failed_job_outcome(job_error: JobError) -> JobExecutionOutcome:
+    return JobExecutionOutcome(status=JobStatus.FAILED, result=job_error)
+
+
+async def _resolve_worker_outcome(
+    job_path: str,
+    return_code: int | None,
+    timed_out: bool,
+    stdout_tail: str,
+    stderr_tail: str,
+) -> JobExecutionOutcome:
+    if timed_out:
+        result_file = await _read_result_file(job_path)
+        return _failed_job_outcome(_timeout_error(result_file, stdout_tail, stderr_tail))
+
+    if return_code not in (None, 0):
+        return _failed_job_outcome(
+            JobError(
+                code=JobErrorCode.WORKER_EXITED,
+                message="Worker process exited unsuccessfully",
+                stdout=stdout_tail,
+                stderr=stderr_tail,
+                exit_code=return_code,
+            )
+        )
+
+    result_file = await _read_result_file(job_path)
+    if result_file.state == ResultFileState.MISSING:
+        return _failed_job_outcome(
+            JobError(
+                code=JobErrorCode.WORKER_RESULT_MISSING,
+                message="Worker did not produce a result file",
+                stdout=stdout_tail,
+                stderr=stderr_tail,
+            )
+        )
+    if result_file.state == ResultFileState.INVALID:
+        return _failed_job_outcome(
+            JobError(
+                code=JobErrorCode.WORKER_RESULT_INVALID,
+                message=result_file.message,
+                stdout=stdout_tail,
+                stderr=stderr_tail,
+            )
+        )
+
+    worker_result = result_file.result
+    if isinstance(worker_result, WorkerCompleted):
+        return JobExecutionOutcome(JobStatus.COMPLETED, worker_result.result)
+    if worker_result is None:
+        raise RuntimeError("Loaded worker result is unexpectedly empty")
+    return _failed_job_outcome(worker_result.error)
+
+
+async def _complete_worker_process(
+    process_context: WorkerProcessContext,
+    job_path: str,
+    job_id: str,
+) -> tuple[JobExecutionOutcome, dict[str, str]]:
+    process_output = await _wait_for_worker_process(process_context, job_id)
+    process_logs = {
+        "stdout": process_output.stdout_tail,
+        "stderr": process_output.stderr_tail,
+    }
+    if process_output.stderr_tail:
+        logger.warning("Job %s wrote to stderr: %s", job_id, process_output.stderr_tail)
+
+    final_outcome = await _resolve_worker_outcome(
+        job_path,
+        process_output.return_code,
+        process_output.timed_out,
+        process_output.stdout_tail,
+        process_output.stderr_tail,
+    )
+    return final_outcome, process_logs
+
+
+async def _collect_cancelled_process_logs(
+    process_context: WorkerProcessContext,
+    job_id: str,
+) -> tuple[dict[str, str], str, str]:
+    stdout_tail, stderr_tail = await _drain_output_tasks(
+        process_context.stdout_task,
+        process_context.stderr_task,
+        process_context.process,
+        job_id,
+    )
+    return {"stdout": stdout_tail, "stderr": stderr_tail}, stdout_tail, stderr_tail
+
+
+def _cancelled_job_outcome(stdout_tail: str, stderr_tail: str) -> JobExecutionOutcome:
+    return JobExecutionOutcome(
+        status=JobStatus.CANCELLED,
+        result=JobError(
+            code=JobErrorCode.JOB_CANCELLED,
+            message="Job was cancelled",
+            stdout=stdout_tail,
+            stderr=stderr_tail,
+        ),
+    )
+
+
+def _processing_failure_outcome(
+    exception: Exception,
+    jobname: str,
+    job_id: str,
+    process_logs: dict[str, str] | None,
+) -> JobExecutionOutcome:
+    logger.error(
+        "System error while processing job %s (%s): %s",
+        jobname,
+        job_id,
+        exception,
+        exc_info=True,
+    )
+    stdout_tail = process_logs["stdout"] if process_logs is not None else ""
+    stderr_tail = process_logs["stderr"] if process_logs is not None else ""
+    return _failed_job_outcome(
+        JobError(
+            code=JobErrorCode.PROCESSING_FAILED,
+            message=str(exception),
+            traceback=traceback.format_exc(),
+            stdout=stdout_tail,
+            stderr=stderr_tail,
+        )
+    )
+
+
+async def _cancelled_process_outcome(
+    process_context: WorkerProcessContext | None,
+    job_id: str,
+) -> tuple[JobExecutionOutcome, dict[str, str] | None]:
+    if process_context is None:
+        return _cancelled_job_outcome("", ""), None
+
+    process_logs, stdout_tail, stderr_tail = await _collect_cancelled_process_logs(
+        process_context,
+        job_id,
+    )
+    return _cancelled_job_outcome(stdout_tail, stderr_tail), process_logs
+
+
+async def _persist_job_outcome(
+    *,
+    job_id: str,
+    jobname: str,
+    final_outcome: JobExecutionOutcome,
+    process_logs: dict[str, str] | None,
+    started_at: float,
+) -> None:
+    metrics.active_jobs.dec()
+    duration_seconds = time.time() - started_at
+    logger.info(
+        "Job %s (%s) finished with status %s in %.2fs.",
+        jobname,
+        job_id,
+        final_outcome.status.value,
+        duration_seconds,
+    )
+
+    if final_outcome.status == JobStatus.COMPLETED:
+        metrics.jobs_completed.inc()
+    elif final_outcome.status == JobStatus.FAILED:
+        metrics.jobs_failed.inc()
+
+    await state.update_job_status(
+        job_id,
+        final_outcome.status,
+        final_outcome.result,
+        duration_seconds,
+        process_logs,
+    )
+
+
+async def _process_job_internal(script_path: str, jobname: str, job_id: str) -> None:
+    """Run one job in an isolated subprocess and persist its terminal outcome."""
+    metrics.active_jobs.inc()
+    started_at = time.time()
+    logger.info("Starting job %s (%s) in a subprocess.", jobname, job_id)
+
+    job_path = os.path.dirname(script_path)
+    final_outcome = _failed_job_outcome(
+        JobError(
+            code=JobErrorCode.PROCESSING_FAILED,
+            message="Worker processing ended without a terminal outcome",
+        )
+    )
+    process_logs: dict[str, str] | None = None
+    process_context: WorkerProcessContext | None = None
 
     try:
         await state.update_job_status(job_id, JobStatus.RUNNING)
-
-        # 서브프로세스 실행 (비동기)
-        subprocess_options = {
-            "cwd": job_path,
-            "stdout": asyncio.subprocess.PIPE,
-            "stderr": asyncio.subprocess.PIPE,
-        }
-        if os.name == "posix":
-            subprocess_options["start_new_session"] = True
-        proc = await asyncio.create_subprocess_exec(*cmd, **subprocess_options)
-
-        if proc.stdout is None or proc.stderr is None:
-            raise RuntimeError("Worker subprocess pipes were not created")
-        stdout_task = asyncio.create_task(
-            _stream_output_to_log(proc.stdout, os.path.join(job_path, STDOUT_LOG_FILENAME))
+        process_context = await _start_worker_process(script_path, job_id)
+        final_outcome, process_logs = await _complete_worker_process(
+            process_context,
+            job_path,
+            job_id,
         )
-        stderr_task = asyncio.create_task(
-            _stream_output_to_log(proc.stderr, os.path.join(job_path, STDERR_LOG_FILENAME))
-        )
-        try:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=JOB_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError:
-                timed_out = True
-                await _terminate_process(proc, job_id)
-            except asyncio.CancelledError:
-                await _terminate_process(proc, job_id)
-                raise
-            stdout_decoded, stderr_decoded = await _drain_output_tasks(
-                stdout_task, stderr_task, proc, job_id
-            )
-        finally:
-            # The direct runner may exit while descendants keep its process group alive.
-            await _terminate_process(proc, job_id, force=True)
-
-        logs = {"stdout": stdout_decoded, "stderr": stderr_decoded}
-
-        if stderr_decoded:
-            logging.warning(f"Job {job_id} stderr: {stderr_decoded}")
-
-        if timed_out:
-            result_file = await _read_result_file(job_path)
-            final_status = JobStatus.FAILED
-            loaded_result = result_file.result if result_file.state == ResultFileState.LOADED else None
-            result_data = JobError(
-                code=JobErrorCode.WORKER_TIMED_OUT,
-                message="Worker exceeded its execution timeout",
-                stdout=stdout_decoded,
-                stderr=stderr_decoded,
-                timeout_seconds=JOB_TIMEOUT_SECONDS,
-                worker_result=loaded_result.result if isinstance(loaded_result, WorkerCompleted) else None,
-                worker_error=loaded_result.error if loaded_result is not None and not isinstance(loaded_result, WorkerCompleted) else None,
-            )
-        elif proc.returncode not in (None, 0):
-            final_status = JobStatus.FAILED
-            result_data = JobError(
-                code=JobErrorCode.WORKER_EXITED,
-                message="Worker process exited unsuccessfully",
-                stdout=stdout_decoded,
-                stderr=stderr_decoded,
-                exit_code=proc.returncode,
-            )
-        else:
-            result_file = await _read_result_file(job_path)
-            if result_file.state == ResultFileState.MISSING:
-                final_status = JobStatus.FAILED
-                result_data = JobError(
-                    code=JobErrorCode.WORKER_RESULT_MISSING,
-                    message="Worker did not produce a result file",
-                    stdout=stdout_decoded,
-                    stderr=stderr_decoded,
-                )
-            elif result_file.state == ResultFileState.INVALID:
-                final_status = JobStatus.FAILED
-                result_data = JobError(
-                    code=JobErrorCode.WORKER_RESULT_INVALID,
-                    message=result_file.message,
-                    stdout=stdout_decoded,
-                    stderr=stderr_decoded,
-                )
-            else:
-                worker_result = result_file.result
-                if isinstance(worker_result, WorkerCompleted):
-                    final_status = JobStatus.COMPLETED
-                    result_data = worker_result.result
-                else:
-                    final_status = JobStatus.FAILED
-                    result_data = worker_result.error
-
     except asyncio.CancelledError:
-        if stdout_task is not None and stderr_task is not None:
-            stdout_decoded, stderr_decoded = await _drain_output_tasks(
-                stdout_task, stderr_task, proc, job_id
-            )
-            logs = {"stdout": stdout_decoded, "stderr": stderr_decoded}
-        final_status = JobStatus.CANCELLED
-        result_data = JobError(
-            code=JobErrorCode.JOB_CANCELLED,
-            message="Job was cancelled",
-            stdout=stdout_decoded,
-            stderr=stderr_decoded,
+        final_outcome, process_logs = await _cancelled_process_outcome(
+            process_context,
+            job_id,
         )
         raise
-    except Exception as e:
-        logging.error(f"System error processing job '{jobname}' (ID: {job_id}): {e}")
-        logging.error(traceback.format_exc())
-        result_data = JobError(
-            code=JobErrorCode.PROCESSING_FAILED,
-            message=str(e),
-            traceback=traceback.format_exc(),
-            stdout=stdout_decoded,
-            stderr=stderr_decoded,
+    except Exception as exception:
+        final_outcome = _processing_failure_outcome(
+            exception,
+            jobname,
+            job_id,
+            process_logs,
         )
-    
     finally:
-        metrics.active_jobs.dec()
+        await _persist_job_outcome(
+            job_id=job_id,
+            jobname=jobname,
+            final_outcome=final_outcome,
+            process_logs=process_logs,
+            started_at=started_at,
+        )
 
-        end_time = time.time()
-        duration = end_time - start_time
-        logging.info(f"Job '{jobname}' (ID: {job_id}) finished with status {final_status} in {duration:.2f}s")
 
-        if final_status == JobStatus.COMPLETED:
-            metrics.jobs_completed.inc()
-        elif final_status == JobStatus.FAILED:
-            metrics.jobs_failed.inc()
-
-        await state.update_job_status(job_id, final_status, result_data, duration, logs)
-
-async def _dispatch_job(job: QueuedJob):
-    """큐에서 작업을 받아 서브프로세스 실행"""
-    script_path = job.script_path
-    jobname = job.jobname
-    job_id = job.job_id
-
-    # 기존의 context.new_page() 로직 제거됨.
-    # Worker Process가 알아서 CDP로 접속하여 처리함.
+async def _dispatch_job(job: QueuedJob) -> None:
+    """Track and await one queued job so API cancellation can find it."""
     process_task = asyncio.create_task(
-        _process_job_internal(script_path, jobname, job_id),
-        name=f"JobProcess-{job_id}",
+        _process_job_internal(job.script_path, job.jobname, job.job_id),
+        name=f"JobProcess-{job.job_id}",
     )
-    _running_job_tasks[job_id] = process_task
+    _running_job_tasks[job.job_id] = process_task
     try:
         await process_task
     except asyncio.CancelledError:
-        logging.info(f"Job '{jobname}' (ID: {job_id}) was cancelled.")
+        logger.info("Job %s (%s) was cancelled.", job.jobname, job.job_id)
         current_task = asyncio.current_task()
         if current_task is not None and current_task.cancelling():
             raise
-    except Exception as e:
-        logging.error(f"Critical dispatch error for job '{jobname}': {e}")
+    except Exception as exception:
+        logger.exception("Critical dispatch error for job %s.", job.jobname)
         await state.update_job_status(
-            job_id,
+            job.job_id,
             JobStatus.FAILED,
-            JobError(code=JobErrorCode.DISPATCH_FAILED, message=str(e)),
+            JobError(code=JobErrorCode.DISPATCH_FAILED, message=str(exception)),
         )
     finally:
-        _running_job_tasks.pop(job_id, None)
+        _running_job_tasks.pop(job.job_id, None)
 
 
 async def cancel_running_job(job_id: str) -> bool:
     task = _running_job_tasks.get(job_id)
-    if task is None or task.done():
-        return False
-    if not task.cancel():
+    if task is None or task.done() or not task.cancel():
         return False
     await asyncio.gather(task, return_exceptions=True)
     return True
@@ -377,43 +566,56 @@ def is_job_running(job_id: str) -> bool:
     task = _running_job_tasks.get(job_id)
     return task is not None and not task.done()
 
-async def _worker():
-    """큐에서 작업을 가져와 처리"""
-    logging.info(f"Worker task started: {asyncio.current_task().get_name()}")
+
+async def _worker() -> None:
+    worker_name = asyncio.current_task().get_name()
+    logger.info("Worker task started: %s", worker_name)
+
     while True:
-        job = await job_queue.get_job()
-        if job is None:
+        queued_job = await job_queue.get_job()
+        if queued_job is None:
             job_queue.task_done()
             break
-        if not job_queue.claim_job(job.job_id):
+        if not job_queue.claim_job(queued_job.job_id):
             job_queue.task_done()
             continue
-        try:
-            await _dispatch_job(job)
-        except Exception as e:
-            logging.error(f"Unhandled exception in worker loop: {e}", exc_info=True)
-        finally:
-            job_queue.release_job(job.job_id)
-            job_queue.task_done()
-    logging.info(f"Worker task stopped: {asyncio.current_task().get_name()}")
 
-def start_workers():
+        try:
+            await _dispatch_job(queued_job)
+        except Exception:
+            logger.exception("Unhandled exception in worker loop for job %s.", queued_job.job_id)
+        finally:
+            job_queue.release_job(queued_job.job_id)
+            job_queue.task_done()
+
+    logger.info("Worker task stopped: %s", worker_name)
+
+
+def start_workers() -> None:
     global _workers
+
     if MAX_CONCURRENT_TASKS < 1:
         raise ValueError("MAX_CONCURRENT_TASKS must be at least 1")
     if _workers:
         return
-    _workers = [asyncio.create_task(_worker(), name=f"Worker-{i+1}") for i in range(MAX_CONCURRENT_TASKS)]
-    logging.info(f"Started {len(_workers)} workers.")
 
-async def stop_workers(drain: bool = True):
+    _workers = [
+        asyncio.create_task(_worker(), name=f"Worker-{worker_number}")
+        for worker_number in range(1, MAX_CONCURRENT_TASKS + 1)
+    ]
+    logger.info("Started %d workers.", len(_workers))
+
+
+async def stop_workers(drain: bool = True) -> None:
     global _workers
+
     if not _workers:
         return
+
     if not drain:
-        logging.error("Cancelling workers immediately because the shared browser is unavailable.")
-        for worker in _workers:
-            worker.cancel()
+        logger.error("Cancelling workers immediately because the shared browser is unavailable.")
+        for worker_task in _workers:
+            worker_task.cancel()
         await asyncio.gather(*_workers, return_exceptions=True)
         _workers = []
         return
@@ -422,9 +624,9 @@ async def stop_workers(drain: bool = True):
     try:
         await job_queue.join(timeout=30.0)
     except asyncio.TimeoutError:
-        logging.error("Worker queue did not drain within 30 seconds; cancelling workers.")
-        for worker in _workers:
-            worker.cancel()
+        logger.error("Worker queue did not drain within 30 seconds; cancelling workers.")
+        for worker_task in _workers:
+            worker_task.cancel()
     finally:
         await asyncio.gather(*_workers, return_exceptions=True)
         _workers = []

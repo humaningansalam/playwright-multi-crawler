@@ -6,44 +6,42 @@ import os
 import shutil
 import stat
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, File, Request, UploadFile, Form, HTTPException, status, Depends
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 
-# core 및 common 모듈 임포트
-from src.core import state_manager as state
-from src.core import job_queue
-from src.core import playwright_manager
-from src.worker import job_processor
-from src.config import JOB_FOLDER
 from src.common.metrics import metrics
-# models 임포트 
+from src.config import JOB_FOLDER
+from src.core import job_queue, playwright_manager
+from src.core import state_manager as state
 from src.models.job import (
+    JOB_STATE_FILENAME,
     ApiErrorCode,
     ApiErrorDetail,
     ApiErrorResponse,
-    JOB_STATE_FILENAME,
     JobCompletedResponse,
     JobError,
     JobErrorCode,
     JobErrorResponse,
     JobProcessingResponse,
+    JobRecord,
     JobResultsResponse,
     JobStatus,
     JobStatusResponse,
     JobSubmitResponse,
     QueuedJob,
 )
+from src.worker import job_processor
 
-router = APIRouter(
-    prefix="/api/jobs", # API 경로 접두사 설정
-    tags=["Jobs"],      # Swagger UI 그룹화 태그
-)
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/jobs", tags=["Jobs"])
 
 RESERVED_JOB_FILENAMES = {
     "script.py",
@@ -56,7 +54,9 @@ RESERVED_JOB_FILENAMES = {
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 LOG_FILENAMES = ("stdout.log", "stderr.log")
 LOG_STREAM_CHUNK_CHARS = 64 * 1024
-def _error_response(description: str) -> dict:
+
+
+def _error_response(description: str) -> dict[str, object]:
     return {"model": ApiErrorResponse, "description": description}
 
 
@@ -95,8 +95,8 @@ class OpenedJobFile:
 
 
 class PinnedFileResponse(FileResponse):
-    def __init__(self, file_descriptor: int, **kwargs):
-        self._file_descriptor: Optional[int] = file_descriptor
+    def __init__(self, file_descriptor: int, **kwargs: Any) -> None:
+        self._file_descriptor: int | None = file_descriptor
         super().__init__(f"/proc/self/fd/{file_descriptor}", **kwargs)
 
     async def __call__(self, scope, receive, send) -> None:
@@ -124,10 +124,12 @@ def _is_valid_additional_filename(filename: str) -> bool:
     return ".." not in posix_path.parts and ".." not in windows_path.parts
 
 
-def _validate_additional_filenames(additional_files: List[UploadFile]) -> Optional[AdditionalFilenameViolation]:
-    seen_filenames = set()
-    for add_file in additional_files:
-        filename = add_file.filename
+def _validate_additional_filenames(
+    additional_files: list[UploadFile],
+) -> AdditionalFilenameViolation | None:
+    seen_filenames: set[str] = set()
+    for additional_file in additional_files:
+        filename = additional_file.filename
         if not filename:
             continue
         if not _is_valid_additional_filename(filename):
@@ -148,7 +150,7 @@ async def _run_file_operation(function, *args):
         try:
             await operation
         except Exception:
-            logging.exception("File operation failed while request cancellation was pending.")
+            logger.exception("File operation failed while request cancellation was pending.")
         raise cancellation
 
 
@@ -160,13 +162,13 @@ async def _open_job_file_for_response(job_path: str, filename: str):
         try:
             opened_file = await operation
         except Exception:
-            logging.exception("Job file open failed while request cancellation was pending.")
+            logger.exception("Job file open failed while request cancellation was pending.")
         else:
             if isinstance(opened_file, OpenedJobFile):
                 try:
                     os.close(opened_file.file_descriptor)
                 except OSError:
-                    logging.exception("Failed to close job file after request cancellation.")
+                    logger.exception("Failed to close job file after request cancellation.")
         raise cancellation
 
 
@@ -178,12 +180,12 @@ async def _open_file(*args, **kwargs):
         try:
             opened_file = await operation
         except Exception:
-            logging.exception("File open failed while request cancellation was pending.")
+            logger.exception("File open failed while request cancellation was pending.")
         else:
             try:
                 await asyncio.to_thread(opened_file.close)
             except Exception:
-                logging.exception("Failed to close file opened during request cancellation.")
+                logger.exception("Failed to close file opened during request cancellation.")
         raise cancellation
 
 
@@ -196,14 +198,14 @@ async def _save_upload_file(upload_file: UploadFile, destination: str) -> None:
         try:
             await _run_file_operation(output_file.close)
         except Exception:
-            logging.exception("Failed to close upload file while another error was pending.")
+            logger.exception("Failed to close upload file while another error was pending.")
         raise
     else:
         await _run_file_operation(output_file.close)
 
 
 def _read_log_content(path: str, offset: int) -> tuple[str, int]:
-    with open(path, "r", encoding="utf-8", errors="replace") as log_file:
+    with open(path, encoding="utf-8", errors="replace") as log_file:
         log_file.seek(offset)
         return log_file.read(LOG_STREAM_CHUNK_CHARS), log_file.tell()
 
@@ -240,8 +242,8 @@ def _open_job_file(job_path: str, filename: str) -> JobFileLookup | OpenedJobFil
         file_descriptor = os.open(lookup.path, flags)
     except FileNotFoundError:
         return JobFileLookup(JobFileLookupState.MISSING, lookup.path)
-    except OSError as exc:
-        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+    except OSError as exception:
+        if exception.errno in {errno.ELOOP, errno.ENOTDIR}:
             return JobFileLookup(JobFileLookupState.OUTSIDE_JOB, lookup.path)
         raise
 
@@ -252,7 +254,7 @@ def _open_job_file(job_path: str, filename: str) -> JobFileLookup | OpenedJobFil
     return OpenedJobFile(file_descriptor, file_stat)
 
 
-def _list_job_files(job_path: str, base_download_url: str) -> Optional[Dict[str, str]]:
+def _list_job_files(job_path: str, base_download_url: str) -> dict[str, str] | None:
     job_dir = Path(job_path).resolve()
     if not job_dir.is_dir():
         return None
@@ -281,26 +283,26 @@ async def _rollback_job_submission_inner(jobname: str, job_id: str, job_path: st
         await state.remove_job_state(job_id)
         state_removed = True
     except Exception:
-        logging.exception("Failed to remove job state during rollback for %s.", job_id)
+        logger.exception("Failed to remove job state during rollback for %s.", job_id)
 
     directory_removed = False
     try:
         await _run_file_operation(_remove_job_path, job_path)
         directory_removed = True
     except OSError:
-        logging.exception("Failed to remove partial job directory %s during rollback.", job_path)
+        logger.exception("Failed to remove partial job directory %s during rollback.", job_path)
 
     if not state_removed and directory_removed:
         try:
             await state.remove_job_state(job_id)
             state_removed = True
         except Exception:
-            logging.exception("Failed to clear job state after rollback removed %s.", job_path)
+            logger.exception("Failed to clear job state after rollback removed %s.", job_path)
 
     if state_removed:
         await state.remove_submitted_job(jobname)
     else:
-        logging.error(
+        logger.error(
             "Keeping active name reservation for %s because rollback did not remove job state %s.",
             jobname,
             job_id,
@@ -308,9 +310,7 @@ async def _rollback_job_submission_inner(jobname: str, job_id: str, job_path: st
 
 
 async def _rollback_job_submission(jobname: str, job_id: str, job_path: str) -> None:
-    rollback_task = asyncio.create_task(
-        _rollback_job_submission_inner(jobname, job_id, job_path)
-    )
+    rollback_task = asyncio.create_task(_rollback_job_submission_inner(jobname, job_id, job_path))
     cancellation = None
     while not rollback_task.done():
         try:
@@ -320,21 +320,180 @@ async def _rollback_job_submission(jobname: str, job_id: str, job_path: str) -> 
                 raise
             if cancellation is None:
                 cancellation = current_cancellation
-        except Exception:
+        except Exception as rollback_error:
             if cancellation is not None:
-                logging.exception("Submission rollback failed while cancellation was pending.")
-                raise cancellation
+                logger.exception("Submission rollback failed while cancellation was pending.")
+                raise cancellation from rollback_error
             raise
 
     try:
         rollback_task.result()
-    except Exception:
+    except Exception as rollback_error:
         if cancellation is not None:
-            logging.exception("Submission rollback failed while cancellation was pending.")
-            raise cancellation
+            logger.exception("Submission rollback failed while cancellation was pending.")
+            raise cancellation from rollback_error
         raise
     if cancellation is not None:
         raise cancellation
+
+
+async def _save_submission_upload(
+    upload_file: UploadFile,
+    destination: str,
+    *,
+    job_id: str,
+    role: str,
+    filename: str | None = None,
+) -> None:
+    try:
+        await _save_upload_file(upload_file, destination)
+    except Exception:
+        logger.exception("Failed to save %s upload for job %s.", role, job_id)
+        error_context: dict[str, object] = {"role": role}
+        if filename is not None:
+            error_context["filename"] = filename
+        _raise_api_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ApiErrorCode.FILE_SAVE_FAILED,
+            "Failed to save uploaded file",
+            **error_context,
+        )
+    finally:
+        await upload_file.close()
+
+
+async def _save_submission_files(
+    job_id: str,
+    job_path: str,
+    script_file: UploadFile,
+    additional_files: list[UploadFile],
+) -> str:
+    script_path = os.path.join(job_path, "script.py")
+    await _save_submission_upload(
+        script_file,
+        script_path,
+        job_id=job_id,
+        role="script",
+    )
+    logger.info("Saved script upload for job %s to %s.", job_id, script_path)
+
+    for additional_file in additional_files:
+        filename = additional_file.filename
+        if not filename:
+            logger.warning("Ignoring an additional upload without a filename for job %s.", job_id)
+            await additional_file.close()
+            continue
+
+        additional_path = os.path.join(job_path, filename)
+        await _save_submission_upload(
+            additional_file,
+            additional_path,
+            job_id=job_id,
+            role="additional",
+            filename=filename,
+        )
+        logger.info("Saved additional upload %s for job %s.", filename, job_id)
+
+    return script_path
+
+
+def _validate_submission_request(
+    request: Request,
+    jobname: str,
+    script_file: UploadFile,
+    additional_files: list[UploadFile],
+) -> None:
+    if not jobname.strip() or script_file.filename is None:
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            ApiErrorCode.INVALID_SUBMISSION,
+            "Job name and script file are required",
+        )
+
+    submissions_enabled = bool(getattr(request.app.state, "job_submission_enabled", False))
+    if not submissions_enabled or not playwright_manager.is_browser_connected():
+        _raise_api_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            ApiErrorCode.WORKERS_UNAVAILABLE,
+            "Job workers are unavailable",
+        )
+
+    filename_violation = _validate_additional_filenames(additional_files)
+    if filename_violation is not None:
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            filename_violation.code,
+            "Additional file name is not allowed",
+            filename=filename_violation.filename,
+        )
+
+
+async def _reserve_job_name(jobname: str) -> None:
+    if await state.add_submitted_job(jobname):
+        return
+    _raise_api_error(
+        status.HTTP_409_CONFLICT,
+        ApiErrorCode.DUPLICATE_JOB_NAME,
+        "A job with this name is already active",
+        jobname=jobname,
+    )
+
+
+async def _create_and_enqueue_job(
+    *,
+    job_id: str,
+    jobname: str,
+    job_path: str,
+    script_file: UploadFile,
+    additional_files: list[UploadFile],
+) -> None:
+    await _run_file_operation(_create_job_path, job_path)
+    logger.info("Accepted job %s (%s); storing inputs in %s.", jobname, job_id, job_path)
+    script_path = await _save_submission_files(
+        job_id,
+        job_path,
+        script_file,
+        additional_files,
+    )
+    await state.set_initial_status(job_id, jobname, job_path)
+    await job_queue.add_job(QueuedJob(script_path=script_path, jobname=jobname, job_id=job_id))
+
+
+async def _prepare_submission_with_rollback(
+    *,
+    job_id: str,
+    jobname: str,
+    job_path: str,
+    script_file: UploadFile,
+    additional_files: list[UploadFile],
+) -> None:
+    try:
+        await _create_and_enqueue_job(
+            job_id=job_id,
+            jobname=jobname,
+            job_path=job_path,
+            script_file=script_file,
+            additional_files=additional_files,
+        )
+    except asyncio.CancelledError:
+        await _rollback_job_submission(jobname, job_id, job_path)
+        logger.info(
+            "Cancelled submission for job %s (%s); partial state was rolled back.",
+            jobname,
+            job_id,
+        )
+        raise
+    except HTTPException:
+        await _rollback_job_submission(jobname, job_id, job_path)
+        raise
+    except Exception:
+        await _rollback_job_submission(jobname, job_id, job_path)
+        logger.exception("Failed to prepare submission for job %s (%s).", jobname, job_id)
+        _raise_api_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ApiErrorCode.SUBMISSION_FAILED,
+            "Failed to process job submission",
+        )
 
 
 @router.post(
@@ -353,119 +512,24 @@ async def submit_job_endpoint(
     request: Request,
     jobname: str = Form(...),
     script_file: UploadFile = File(...),
-    additional_files: List[UploadFile] = File(default=[])
-):
-    """
-    새로운 크롤링 작업을 제출
-    - **jobname**: 작업의 고유 이름
-    - **script_file**: 실행할 Python 크롤링 스크립트 
-    - **additional_files**: 스크립트 실행에 필요한 추가 파일 목록
-    """
-    if not jobname.strip() or not script_file or script_file.filename is None:
-        _raise_api_error(
-            status.HTTP_400_BAD_REQUEST,
-            ApiErrorCode.INVALID_SUBMISSION,
-            "Job name and script file are required",
-        )
-
-    if (
-        not getattr(request.app.state, "job_submission_enabled", False)
-        or not playwright_manager.is_browser_connected()
-    ):
-        _raise_api_error(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            ApiErrorCode.WORKERS_UNAVAILABLE,
-            "Job workers are unavailable",
-        )
-
-    filename_violation = _validate_additional_filenames(additional_files)
-    if filename_violation is not None:
-        _raise_api_error(
-            status.HTTP_400_BAD_REQUEST,
-            filename_violation.code,
-            "Additional file name is not allowed",
-            filename=filename_violation.filename,
-        )
-
-    # 중복 작업 이름 체크 및 등록
-    if not await state.add_submitted_job(jobname):
-        _raise_api_error(
-            status.HTTP_409_CONFLICT,
-            ApiErrorCode.DUPLICATE_JOB_NAME,
-            "A job with this name is already active",
-            jobname=jobname,
-        )
+    additional_files: list[UploadFile] = File(default=[]),
+) -> JobSubmitResponse:
+    """Validate, persist, and enqueue a new crawler job."""
+    _validate_submission_request(request, jobname, script_file, additional_files)
+    await _reserve_job_name(jobname)
 
     job_id = str(uuid.uuid4())
-    # JOB_FOLDER는 config에서 가져옴
     job_path = os.path.join(JOB_FOLDER, job_id)
+    await _prepare_submission_with_rollback(
+        job_id=job_id,
+        jobname=jobname,
+        job_path=job_path,
+        script_file=script_file,
+        additional_files=additional_files,
+    )
 
-    try:
-        await _run_file_operation(_create_job_path, job_path)
-        logging.info(f"Received job submission '{jobname}' -> Assigning ID: {job_id}, Path: {job_path}")
-
-        # --- 파일 저장 로직 ---
-        # script_file 저장
-        script_filename = "script.py" # 일관성을 위해 고정된 이름 사용
-        script_path = os.path.join(job_path, script_filename)
-        try:
-            await _save_upload_file(script_file, script_path)
-            logging.info(f"Saved script file for job {job_id} to {script_path}")
-        except Exception as e:
-            logging.error(f"Failed to save script file for job {job_id}: {e}")
-            _raise_api_error(
-                status.HTTP_500_INTERNAL_SERVER_ERROR,
-                ApiErrorCode.FILE_SAVE_FAILED,
-                "Failed to save uploaded file",
-                role="script",
-            )
-        finally:
-             await script_file.close()
-
-        # additional_files 저장
-        for add_file in additional_files:
-            if add_file.filename:
-                add_file_path = os.path.join(job_path, add_file.filename)
-                try:
-                    logging.info(f"Saving additional file: {add_file.filename} for job {job_id}")
-                    await _save_upload_file(add_file, add_file_path)
-                except Exception as e:
-                    logging.error(f"Failed to save additional file {add_file.filename} for job {job_id}: {e}")
-                    _raise_api_error(
-                        status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        ApiErrorCode.FILE_SAVE_FAILED,
-                        "Failed to save uploaded file",
-                        role="additional",
-                        filename=add_file.filename,
-                    )
-                finally:
-                    await add_file.close()
-            else:
-                 logging.warning(f"Received additional file without filename for job {job_id}. Skipping.")
-
-        await state.set_initial_status(job_id, jobname, job_path)
-        await job_queue.add_job(
-            QueuedJob(script_path=script_path, jobname=jobname, job_id=job_id)
-        )
-
-    except asyncio.CancelledError:
-        await _rollback_job_submission(jobname, job_id, job_path)
-        logging.info(f"Cancelled job submission '{jobname}' (ID: {job_id}); rolled back partial state.")
-        raise
-    except Exception as e:
-        await _rollback_job_submission(jobname, job_id, job_path)
-        logging.error(f"Failed during job submission setup for '{jobname}' (ID: {job_id}): {e}")
-        if isinstance(e, HTTPException):
-            raise
-        _raise_api_error(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            ApiErrorCode.SUBMISSION_FAILED,
-            "Failed to process job submission",
-        )
-    
     metrics.jobs_submitted.inc()
-    
-    logging.info(f"Job '{jobname}' (ID: {job_id}) successfully queued.")
+    logger.info("Queued job %s (%s).", jobname, job_id)
     return JobSubmitResponse(job_id=job_id)
 
 
@@ -478,7 +542,7 @@ async def submit_job_endpoint(
         409: _error_response("Job is already terminal"),
     },
 )
-async def cancel_job_endpoint(job_id: str):
+async def cancel_job_endpoint(job_id: str) -> JobStatusResponse:
     current_status = await state.get_job_status(job_id)
     if current_status is None:
         _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
@@ -515,25 +579,71 @@ async def cancel_job_endpoint(job_id: str):
 
     return JobStatusResponse(job_id=job_id, status=JobStatus.CANCELLED)
 
+
 @router.get(
     "/status/{job_id}",
     response_model=JobStatusResponse,
     response_model_exclude_none=True,
     responses={404: _error_response("Job not found")},
 )
-async def get_job_status_endpoint(job_id: str):
-    """특정 작업의 현재 상태를 조회합니다."""
-    job_info = await state.get_job_info(job_id)
-    if job_info is None:
+async def get_job_status_endpoint(job_id: str) -> JobStatusResponse:
+    """Return the current lifecycle status for one job."""
+    job_record = await state.get_job_info(job_id)
+    if job_record is None:
         _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
     return JobStatusResponse(
         job_id=job_id,
-        status=job_info.status,
-        submitted_at=job_info.submitted_at,
-        started_at=job_info.started_at,
-        completed_at=job_info.completed_at,
-        queue_wait_seconds=job_info.queue_wait_seconds,
-        run_duration_seconds=job_info.run_duration_seconds,
+        status=job_record.status,
+        submitted_at=job_record.submitted_at,
+        started_at=job_record.started_at,
+        completed_at=job_record.completed_at,
+        queue_wait_seconds=job_record.queue_wait_seconds,
+        run_duration_seconds=job_record.run_duration_seconds,
+    )
+
+
+async def _list_result_files(
+    job_id: str,
+    job_path: str,
+) -> tuple[dict[str, str] | None, ApiErrorDetail | None]:
+    try:
+        base_download_url = f"{router.prefix}/download/{job_id}"
+        result_files = await _run_file_operation(
+            _list_job_files,
+            job_path,
+            base_download_url,
+        )
+    except (OSError, RuntimeError, ValueError):
+        logger.exception("Could not list result files for job %s in %s.", job_id, job_path)
+        return None, ApiErrorDetail(
+            code=ApiErrorCode.RESULT_FILES_UNAVAILABLE,
+            message="Could not list result files",
+        )
+    return result_files, None
+
+
+def _build_terminal_result_response(
+    job_record: JobRecord,
+    result_files: dict[str, str] | None,
+    files_error: ApiErrorDetail | None,
+) -> JobCompletedResponse | JobErrorResponse:
+    response_type = (
+        JobCompletedResponse if job_record.status == JobStatus.COMPLETED else JobErrorResponse
+    )
+    return response_type(
+        job_id=job_record.job_id,
+        status=job_record.status,
+        result=job_record.result,
+        logs=job_record.logs,
+        files=result_files,
+        files_error=files_error,
+        jobname=job_record.jobname,
+        submitted_at=job_record.submitted_at,
+        started_at=job_record.started_at,
+        completed_at=job_record.completed_at,
+        queue_wait_seconds=job_record.queue_wait_seconds,
+        run_duration_seconds=job_record.run_duration_seconds,
+        duration_seconds=job_record.duration_seconds,
     )
 
 
@@ -542,72 +652,26 @@ async def get_job_status_endpoint(job_id: str):
     response_model=JobResultsResponse,
     responses={404: _error_response("Job not found")},
 )
-async def get_job_results_endpoint(job_id: str):
-    """
-    특정 작업의 결과를 조회합니다.
-    작업이 완료되거나 실패한 경우 상세 결과와 파일 목록을 반환합니다.
-    처리 중인 경우 현재 상태를 반환합니다.
-    """
-    job_info = await state.get_job_info(job_id) # 전체 정보 가져오기
-    if not job_info:
+async def get_job_results_endpoint(job_id: str) -> JobResultsResponse:
+    """Return progress for an active job or its terminal result and files."""
+    job_record = await state.get_job_info(job_id)
+    if job_record is None:
         _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
 
-    status_val = job_info.status
-
-    if status_val.is_active:
-        # 처리 중인 경우 
+    if job_record.status.is_active:
         return JobProcessingResponse(
             job_id=job_id,
-            status=status_val,
-            submitted_at=job_info.submitted_at,
-            started_at=job_info.started_at,
-            queue_wait_seconds=job_info.queue_wait_seconds,
-        )
-    if status_val.is_terminal:
-        # 완료 또는 실패한 경우
-        result_val = job_info.result
-        job_path = job_info.job_path
-        files: Optional[Dict[str, str]] = None 
-        files_error: Optional[ApiErrorDetail] = None
-
-        if job_path:
-            try:
-                base_download_url = f"{router.prefix}/download/{job_id}"
-                files = await _run_file_operation(
-                    _list_job_files,
-                    job_path,
-                    base_download_url,
-                )
-            except (OSError, RuntimeError, ValueError) as e:
-                logging.error(f"Error listing files for job {job_id} in {job_path}: {e}")
-                files_error = ApiErrorDetail(
-                    code=ApiErrorCode.RESULT_FILES_UNAVAILABLE,
-                    message="Could not list result files",
-                )
-
-        response_model = (
-            JobCompletedResponse
-            if status_val == JobStatus.COMPLETED
-            else JobErrorResponse
-        )
-        return response_model(
-            job_id=job_id,
-            status=status_val,
-            result=result_val,
-            logs=job_info.logs,
-            files=files,
-            files_error=files_error,
-            jobname=job_info.jobname,
-            submitted_at=job_info.submitted_at,
-            started_at=job_info.started_at,
-            completed_at=job_info.completed_at,
-            queue_wait_seconds=job_info.queue_wait_seconds,
-            run_duration_seconds=job_info.run_duration_seconds,
-            duration_seconds=job_info.duration_seconds,
+            status=job_record.status,
+            submitted_at=job_record.submitted_at,
+            started_at=job_record.started_at,
+            queue_wait_seconds=job_record.queue_wait_seconds,
         )
 
+    result_files, files_error = await _list_result_files(job_id, job_record.job_path)
+    return _build_terminal_result_response(job_record, result_files, files_error)
 
-async def _stream_job_logs(job_id: str, job_path: str):
+
+async def _stream_job_logs(job_id: str, job_path: str) -> AsyncIterator[str]:
     offsets = {filename: 0 for filename in LOG_FILENAMES}
     while True:
         backlog_remaining = False
@@ -628,13 +692,10 @@ async def _stream_job_logs(job_id: str, job_path: str):
                 backlog_remaining = backlog_remaining or len(content) == LOG_STREAM_CHUNK_CHARS
 
         job_status = await state.get_job_status(job_id)
-        if (
-            job_status is None
-            or (
-                job_status.is_terminal
-                and not job_processor.is_job_running(job_id)
-                and not backlog_remaining
-            )
+        if job_status is None or (
+            job_status.is_terminal
+            and not job_processor.is_job_running(job_id)
+            and not backlog_remaining
         ):
             return
         if backlog_remaining:
@@ -653,16 +714,57 @@ async def _stream_job_logs(job_id: str, job_path: str):
         404: _error_response("Job not found"),
     },
 )
-async def stream_job_logs_endpoint(job_id: str):
-    job_info = await state.get_job_info(job_id)
-    if not job_info:
+async def stream_job_logs_endpoint(job_id: str) -> StreamingResponse:
+    job_record = await state.get_job_info(job_id)
+    if job_record is None:
         _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
 
     return StreamingResponse(
-        _stream_job_logs(job_id, job_info.job_path),
+        _stream_job_logs(job_id, job_record.job_path),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+async def _open_download_file(
+    job_id: str,
+    job_path: str,
+    filename: str,
+) -> OpenedJobFile:
+    opened_job_file = await _open_job_file_for_response(job_path, filename)
+    if not isinstance(opened_job_file, JobFileLookup):
+        return opened_job_file
+
+    if opened_job_file.state == JobFileLookupState.OUTSIDE_JOB:
+        logger.warning("Attempted directory traversal for %s in job %s.", filename, job_id)
+        _raise_api_error(
+            status.HTTP_403_FORBIDDEN,
+            ApiErrorCode.ACCESS_DENIED,
+            "Requested file is outside the job directory",
+            filename=filename,
+        )
+
+    logger.warning("Requested file not found: %s", opened_job_file.path)
+    _raise_api_error(
+        status.HTTP_404_NOT_FOUND,
+        ApiErrorCode.FILE_NOT_FOUND,
+        "File not found",
+        filename=filename,
+    )
+
+
+def _build_download_response(opened_job_file: OpenedJobFile, filename: str) -> FileResponse:
+    # FileResponse reopens its path later, so serve the already validated inode.
+    try:
+        return PinnedFileResponse(
+            opened_job_file.file_descriptor,
+            media_type="application/octet-stream",
+            filename=filename,
+            stat_result=opened_job_file.stat_result,
+        )
+    except BaseException:
+        os.close(opened_job_file.file_descriptor)
+        raise
 
 
 @router.get(
@@ -672,19 +774,17 @@ async def stream_job_logs_endpoint(job_id: str):
         200: {
             "description": "Result file download",
             "content": {
-                "application/octet-stream": {
-                    "schema": {"type": "string", "format": "binary"}
-                }
+                "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
             },
         },
         403: _error_response("Access denied"),
         404: _error_response("Job or file not found"),
     },
 )
-async def download_file_endpoint(job_id: str, filename: str):
-    """개별 결과 파일을 다운로드합니다."""
-    job_info = await state.get_job_info(job_id)
-    if not job_info:
+async def download_file_endpoint(job_id: str, filename: str) -> FileResponse:
+    """Return one validated regular file from a job directory."""
+    job_record = await state.get_job_info(job_id)
+    if job_record is None:
         _raise_api_error(status.HTTP_404_NOT_FOUND, ApiErrorCode.JOB_NOT_FOUND, "Job not found")
 
     if filename == JOB_STATE_FILENAME:
@@ -695,34 +795,5 @@ async def download_file_endpoint(job_id: str, filename: str):
             filename=filename,
         )
 
-    opened_file = await _open_job_file_for_response(job_info.job_path, filename)
-
-    if isinstance(opened_file, JobFileLookup) and opened_file.state == JobFileLookupState.OUTSIDE_JOB:
-        logging.warning(f"Attempted directory traversal: {filename} for job {job_id}")
-        _raise_api_error(
-            status.HTTP_403_FORBIDDEN,
-            ApiErrorCode.ACCESS_DENIED,
-            "Requested file is outside the job directory",
-            filename=filename,
-        )
-
-    if isinstance(opened_file, JobFileLookup):
-        logging.warning(f"Requested file not found: {opened_file.path}")
-        _raise_api_error(
-            status.HTTP_404_NOT_FOUND,
-            ApiErrorCode.FILE_NOT_FOUND,
-            "File not found",
-            filename=filename,
-        )
-
-    # FileResponse reopens its path later, so serve the already validated inode.
-    try:
-        return PinnedFileResponse(
-            opened_file.file_descriptor,
-            media_type="application/octet-stream",
-            filename=filename,
-            stat_result=opened_file.stat_result,
-        )
-    except BaseException:
-        os.close(opened_file.file_descriptor)
-        raise
+    opened_job_file = await _open_download_file(job_id, job_record.job_path, filename)
+    return _build_download_response(opened_job_file, filename)

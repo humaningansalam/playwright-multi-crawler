@@ -4,8 +4,8 @@ import os
 import signal
 import socket
 import threading
-import tomllib
 import time
+import tomllib
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -14,16 +14,14 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from src.config import JOB_FOLDER
+from src import main as main_module
 from src.api import jobs as jobs_api
 from src.api.jobs import download_file_endpoint, stream_job_logs_endpoint
-from src.core import state_manager as state
-from src.core import job_queue
-from src.main import app
-from src import main as main_module
-from src.worker import job_processor
-from src.core import playwright_manager
 from src.common import tool_utils
+from src.config import JOB_FOLDER
+from src.core import job_queue, playwright_manager
+from src.core import state_manager as state
+from src.main import app
 from src.models.job import (
     JOB_RESULTS_RESPONSE_ADAPTER,
     ApiErrorCode,
@@ -33,14 +31,21 @@ from src.models.job import (
     PersistedJobStateV1,
     QueuedJob,
 )
+from src.worker import job_processor
 
 
 def test_job_status_owns_lifecycle_classification():
     assert JobStatus.PENDING.is_active
     assert JobStatus.RUNNING.is_active
-    assert all(status.is_terminal for status in (
-        JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED
-    ))
+    assert all(
+        status.is_terminal
+        for status in (
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.INTERRUPTED,
+        )
+    )
 
 
 def test_browser_launch_options_omit_executable_by_default(monkeypatch):
@@ -133,9 +138,7 @@ async def test_browser_start_rejects_occupied_ipv4_cdp_port(monkeypatch):
     class _UnexpectedPlaywrightStarter:
         async def start(self):
             calls.append("playwright.start")
-            raise AssertionError(
-                "Playwright must not start while the CDP port is occupied"
-            )
+            raise AssertionError("Playwright must not start while the CDP port is occupied")
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
@@ -526,7 +529,9 @@ def test_browser_disconnect_during_shutdown_does_not_exit(monkeypatch):
 
 def test_official_entrypoint_preserves_requested_failure_exit(monkeypatch):
     uvicorn_calls = []
-    monkeypatch.setattr(main_module.uvicorn, "run", lambda *args, **kwargs: uvicorn_calls.append((args, kwargs)))
+    monkeypatch.setattr(
+        main_module.uvicorn, "run", lambda *args, **kwargs: uvicorn_calls.append((args, kwargs))
+    )
     monkeypatch.setattr(playwright_manager, "requested_exit_code", lambda: 1)
 
     with pytest.raises(SystemExit) as exc:
@@ -534,6 +539,7 @@ def test_official_entrypoint_preserves_requested_failure_exit(monkeypatch):
 
     assert exc.value.code == 1
     assert uvicorn_calls
+
 
 @pytest.mark.asyncio
 async def test_health_check_reports_ready_service(client: httpx.AsyncClient, monkeypatch):
@@ -702,12 +708,16 @@ async def test_openapi_metrics_200_content_type():
 
 @pytest.mark.asyncio
 async def test_openapi_job_download_200_content_type():
-    responses = app.openapi()["paths"]["/api/jobs/download/{job_id}/{filename}"]["get"]["responses"]["200"]["content"]
+    responses = app.openapi()["paths"]["/api/jobs/download/{job_id}/{filename}"]["get"][
+        "responses"
+    ]["200"]["content"]
     assert "application/octet-stream" in responses
 
 
 def test_openapi_job_results_200_documents_response_models():
-    schema = app.openapi()["paths"]["/api/jobs/results/{job_id}"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    schema = app.openapi()["paths"]["/api/jobs/results/{job_id}"]["get"]["responses"]["200"][
+        "content"
+    ]["application/json"]["schema"]
 
     refs = {entry["$ref"] for entry in schema["oneOf"]}
     assert refs == {
@@ -728,9 +738,7 @@ def test_openapi_job_results_200_documents_response_models():
     }
     error_schema = app.openapi()["components"]["schemas"]["JobErrorResponse"]
     assert "result" in error_schema["required"]
-    assert error_schema["properties"]["result"] == {
-        "$ref": "#/components/schemas/JobError"
-    }
+    assert error_schema["properties"]["result"] == {"$ref": "#/components/schemas/JobError"}
 
 
 @pytest.mark.parametrize(
@@ -750,7 +758,9 @@ def test_terminal_error_results_require_structured_job_error(payload):
 
 
 def test_openapi_submit_status_is_always_pending():
-    status_schema = app.openapi()["components"]["schemas"]["JobSubmitResponse"]["properties"]["status"]
+    status_schema = app.openapi()["components"]["schemas"]["JobSubmitResponse"]["properties"][
+        "status"
+    ]
 
     assert status_schema["const"] == "PENDING"
 
@@ -767,10 +777,14 @@ def test_openapi_job_routes_document_error_responses():
     assert "404" in openapi["paths"]["/api/jobs/status/{job_id}"]["get"]["responses"]
     assert "404" in openapi["paths"]["/api/jobs/results/{job_id}"]["get"]["responses"]
     assert "500" not in openapi["paths"]["/api/jobs/results/{job_id}"]["get"]["responses"]
-    assert {"403", "404"} <= set(openapi["paths"]["/api/jobs/download/{job_id}/{filename}"]["get"]["responses"])
+    assert {"403", "404"} <= set(
+        openapi["paths"]["/api/jobs/download/{job_id}/{filename}"]["get"]["responses"]
+    )
     assert {"404", "409"} <= set(openapi["paths"]["/api/jobs/{job_id}/cancel"]["post"]["responses"])
 
-    error_schema = openapi["paths"]["/api/jobs/status/{job_id}"]["get"]["responses"]["404"]["content"]["application/json"]["schema"]
+    error_schema = openapi["paths"]["/api/jobs/status/{job_id}"]["get"]["responses"]["404"][
+        "content"
+    ]["application/json"]["schema"]
     assert error_schema == {"$ref": "#/components/schemas/ApiErrorResponse"}
     detail_schema = openapi["components"]["schemas"]["ApiErrorDetail"]
     assert detail_schema["required"] == ["code", "message"]
@@ -791,12 +805,13 @@ def test_openapi_stream_and_health_error_content_types():
 def test_openapi_info_version_matches_pyproject():
     assert app.openapi()["info"]["version"] == _pyproject_version()
 
+
 @pytest.mark.asyncio
 async def test_submit_job_accepted(client: httpx.AsyncClient):
     """작업 제출 시 202 Accepted 와 job_id 반환 테스트"""
     job_name = f"submit_test_{int(time.time())}"
-    files = {'script_file': ('dummy_script.py', DUMMY_SCRIPT_CONTENT, 'text/x-python')}
-    data = {'jobname': job_name}
+    files = {"script_file": ("dummy_script.py", DUMMY_SCRIPT_CONTENT, "text/x-python")}
+    data = {"jobname": job_name}
 
     response = await client.post("/api/jobs/submit", data=data, files=files)
 
@@ -995,12 +1010,13 @@ async def test_malformed_multipart_uses_public_error_contract(client: httpx.Asyn
         }
     }
 
+
 @pytest.mark.asyncio
 async def test_get_initial_status(client: httpx.AsyncClient):
     """작업 제출 직후 상태가 PENDING 인지 테스트"""
     job_name = f"status_test_{int(time.time())}"
-    files = {'script_file': ('dummy_script.py', DUMMY_SCRIPT_CONTENT, 'text/x-python')}
-    data = {'jobname': job_name}
+    files = {"script_file": ("dummy_script.py", DUMMY_SCRIPT_CONTENT, "text/x-python")}
+    data = {"jobname": job_name}
 
     submit_response = await client.post("/api/jobs/submit", data=data, files=files)
     assert submit_response.status_code == 202
@@ -1011,12 +1027,13 @@ async def test_get_initial_status(client: httpx.AsyncClient):
     assert status_response.status_code == 200
     assert status_response.json()["status"] == "PENDING"
 
+
 @pytest.mark.asyncio
 async def test_get_results_for_pending_job(client: httpx.AsyncClient):
     """처리 중인 작업 결과 요청 시 적절한 응답 반환 테스트"""
     job_name = f"results_pending_test_{int(time.time())}"
-    files = {'script_file': ('dummy_script.py', DUMMY_SCRIPT_CONTENT, 'text/x-python')}
-    data = {'jobname': job_name}
+    files = {"script_file": ("dummy_script.py", DUMMY_SCRIPT_CONTENT, "text/x-python")}
+    data = {"jobname": job_name}
 
     submit_response = await client.post("/api/jobs/submit", data=data, files=files)
     assert submit_response.status_code == 202
@@ -1024,10 +1041,10 @@ async def test_get_results_for_pending_job(client: httpx.AsyncClient):
 
     # 처리 중일 때 결과 요청
     results_response = await client.get(f"/api/jobs/results/{job_id}")
-    assert results_response.status_code == 200 # 서버는 200 OK 와 함께 상태 메시지 반환
+    assert results_response.status_code == 200  # 서버는 200 OK 와 함께 상태 메시지 반환
     result_data = results_response.json()
     assert result_data["job_id"] == job_id
-    assert result_data["status"] in ["PENDING", "RUNNING"] # PENDING 또는 RUNNING 상태 기대
+    assert result_data["status"] in ["PENDING", "RUNNING"]  # PENDING 또는 RUNNING 상태 기대
     assert "message" in result_data
 
 
@@ -1055,7 +1072,9 @@ async def test_cancel_pending_job_marks_it_cancelled_and_removes_submission(
     monkeypatch.setattr(job_processor.metrics, "queued_jobs", queued_jobs)
     await state.set_initial_status(job_id, job_name, str(tmp_path))
     await state.add_submitted_job(job_name)
-    await job_queue.add_job(QueuedJob(job_id=job_id, jobname=job_name, script_path=str(tmp_path / "script.py")))
+    await job_queue.add_job(
+        QueuedJob(job_id=job_id, jobname=job_name, script_path=str(tmp_path / "script.py"))
+    )
     response = await client.post(f"/api/jobs/{job_id}/cancel")
 
     assert response.status_code == 200
@@ -1242,7 +1261,9 @@ async def test_stream_job_logs_waits_for_cancelled_process_output_drain(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_interrupted_job_is_a_terminal_result_and_stops_log_stream(client: httpx.AsyncClient, tmp_path):
+async def test_interrupted_job_is_a_terminal_result_and_stops_log_stream(
+    client: httpx.AsyncClient, tmp_path
+):
     job_id = "interrupted-job"
     await state.set_initial_status(job_id, "interrupted", str(tmp_path))
     await state.update_job_status(
@@ -1264,7 +1285,9 @@ async def test_interrupted_job_is_a_terminal_result_and_stops_log_stream(client:
 
 @pytest.mark.asyncio
 async def test_worker_skips_cancelled_queued_job_without_releasing_resubmitted_name(monkeypatch):
-    job = QueuedJob(job_id="skip-cancelled-job", jobname="skip_cancelled", script_path="/tmp/script.py")
+    job = QueuedJob(
+        job_id="skip-cancelled-job", jobname="skip_cancelled", script_path="/tmp/script.py"
+    )
     queue_items = iter((job, None))
     dispatched = []
     task_done_calls = []
@@ -1357,9 +1380,7 @@ async def test_restore_jobs_rejects_existing_queue_without_partial_enqueue():
     await job_queue.add_job(existing)
 
     with pytest.raises(RuntimeError, match="non-empty queue state"):
-        job_queue.restore_jobs(
-            [QueuedJob(job_id="new", jobname="new", script_path="/tmp/new.py")]
-        )
+        job_queue.restore_jobs([QueuedJob(job_id="new", jobname="new", script_path="/tmp/new.py")])
 
     assert job_queue.qsize() == 1
     assert await job_queue.get_job() == existing
@@ -1421,9 +1442,7 @@ async def test_get_completed_results_lists_downloadable_files(client: httpx.Asyn
     assert result_data["completed_at"] is not None
     assert result_data["run_duration_seconds"] == 1.25
     assert result_data["duration_seconds"] == 1.25
-    assert result_data["files"] == {
-        "output.txt": f"/api/jobs/download/{job_id}/output.txt"
-    }
+    assert result_data["files"] == {"output.txt": f"/api/jobs/download/{job_id}/output.txt"}
     assert (job_dir / "state.json").is_file()
 
     download_response = await client.get(f"/api/jobs/download/{job_id}/output.txt")
@@ -1542,9 +1561,7 @@ async def test_recovered_pending_job_blocks_duplicate_submission(
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == ApiErrorCode.DUPLICATE_JOB_NAME
 
-    state_download_response = await client.get(
-        f"/api/jobs/download/{job_id}/state.json"
-    )
+    state_download_response = await client.get(f"/api/jobs/download/{job_id}/state.json")
     assert state_download_response.status_code == 404
     assert state_download_response.json()["detail"] == {
         "code": ApiErrorCode.FILE_NOT_FOUND,
@@ -1575,7 +1592,16 @@ async def test_download_pins_validated_file_before_response_stream(tmp_path):
     async def send(message):
         messages.append(message)
 
-    await response({"type": "http", "method": "GET", "headers": []}, receive, send)
+    await response(
+        {
+            "type": "http",
+            "method": "GET",
+            "headers": [],
+            "asgi": {"spec_version": "2.4"},
+        },
+        receive,
+        send,
+    )
 
     body = b"".join(message.get("body", b"") for message in messages)
     assert body == b"inside"
@@ -1676,7 +1702,9 @@ async def test_result_file_listing_does_not_block_event_loop(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_completed_result_encodes_reserved_filename_download_link(client: httpx.AsyncClient, tmp_path):
+async def test_completed_result_encodes_reserved_filename_download_link(
+    client: httpx.AsyncClient, tmp_path
+):
     job_id = "encoded-download-test"
     job_dir = tmp_path / job_id
     job_dir.mkdir()
@@ -1699,7 +1727,9 @@ async def test_completed_result_encodes_reserved_filename_download_link(client: 
 
 
 @pytest.mark.asyncio
-async def test_completed_result_omits_files_outside_job_directory(client: httpx.AsyncClient, tmp_path):
+async def test_completed_result_omits_files_outside_job_directory(
+    client: httpx.AsyncClient, tmp_path
+):
     job_id = "outside-symlink-listing-test"
     job_dir = tmp_path / job_id
     job_dir.mkdir()
@@ -1715,9 +1745,7 @@ async def test_completed_result_omits_files_outside_job_directory(client: httpx.
     response = await client.get(f"/api/jobs/results/{job_id}")
 
     assert response.status_code == 200
-    assert response.json()["files"] == {
-        "inside.txt": f"/api/jobs/download/{job_id}/inside.txt"
-    }
+    assert response.json()["files"] == {"inside.txt": f"/api/jobs/download/{job_id}/inside.txt"}
 
 
 @pytest.mark.asyncio
@@ -1726,18 +1754,20 @@ async def test_get_status_not_found(client: httpx.AsyncClient):
     response = await client.get("/api/jobs/status/non-existent-job-id")
     assert response.status_code == 404
 
+
 @pytest.mark.asyncio
 async def test_get_results_not_found(client: httpx.AsyncClient):
     """존재하지 않는 job_id 결과 조회 시 404 반환 테스트"""
     response = await client.get("/api/jobs/results/non-existent-job-id")
     assert response.status_code == 404
 
+
 @pytest.mark.asyncio
 async def test_submit_duplicate_job(client: httpx.AsyncClient):
     """중복 작업 제출 시 409 Conflict 반환 테스트"""
     job_name = f"duplicate_test_{int(time.time())}"
-    files = {'script_file': ('dummy_script.py', DUMMY_SCRIPT_CONTENT, 'text/x-python')}
-    data = {'jobname': job_name}
+    files = {"script_file": ("dummy_script.py", DUMMY_SCRIPT_CONTENT, "text/x-python")}
+    data = {"jobname": job_name}
 
     # 첫 번째 제출
     response1 = await client.post("/api/jobs/submit", data=data, files=files)
@@ -1750,6 +1780,7 @@ async def test_submit_duplicate_job(client: httpx.AsyncClient):
     response2 = await client.post("/api/jobs/submit", data=data, files=files)
     assert response2.status_code == 409
 
+
 @pytest.mark.asyncio
 async def test_submit_additional_file_rejects_path_traversal(client: httpx.AsyncClient):
     job_name = f"traversal_test_{int(time.time())}"
@@ -1758,10 +1789,10 @@ async def test_submit_additional_file_rejects_path_traversal(client: httpx.Async
         escaped_target.unlink()
 
     files = [
-        ('script_file', ('dummy_script.py', DUMMY_SCRIPT_CONTENT, 'text/x-python')),
-        ('additional_files', ('../evil.txt', 'malicious payload', 'text/plain')),
+        ("script_file", ("dummy_script.py", DUMMY_SCRIPT_CONTENT, "text/x-python")),
+        ("additional_files", ("../evil.txt", "malicious payload", "text/plain")),
     ]
-    data = {'jobname': job_name}
+    data = {"jobname": job_name}
 
     response = await client.post("/api/jobs/submit", data=data, files=files)
 
@@ -1873,9 +1904,14 @@ async def test_download_handles_invalid_filename_as_missing(tmp_path):
 async def test_lightweight_lifespan_skips_workers(monkeypatch):
     calls = []
 
-    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
-    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display") or True)
+    monkeypatch.setattr(
+        "src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder")
+    )
+    monkeypatch.setattr(
+        "src.common.tool_utils.start_display", lambda: calls.append("start_display") or True
+    )
     monkeypatch.setattr("src.common.tool_utils.stop_display", lambda: calls.append("stop_display"))
+
     async def fake_playwright_start():
         calls.append("playwright_start")
 
@@ -1884,7 +1920,10 @@ async def test_lightweight_lifespan_skips_workers(monkeypatch):
 
     monkeypatch.setattr("src.core.playwright_manager.start", fake_playwright_start)
     monkeypatch.setattr("src.core.playwright_manager.shutdown", fake_playwright_shutdown)
-    monkeypatch.setattr("src.worker.job_processor.start_workers", lambda: calls.append("start_workers"))
+    monkeypatch.setattr(
+        "src.worker.job_processor.start_workers", lambda: calls.append("start_workers")
+    )
+
     async def fake_stop_workers():
         calls.append("stop_workers")
 
@@ -1909,7 +1948,9 @@ async def test_submit_is_rejected_when_workers_are_disabled(monkeypatch):
 
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as disabled_client:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as disabled_client:
             response = await disabled_client.post(
                 "/api/jobs/submit",
                 data={"jobname": "workers-disabled"},
@@ -1945,9 +1986,14 @@ async def test_submit_is_rejected_when_browser_is_unavailable(
 async def test_heavy_lifespan_starts_workers(monkeypatch):
     calls = []
 
-    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
-    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display") or True)
+    monkeypatch.setattr(
+        "src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder")
+    )
+    monkeypatch.setattr(
+        "src.common.tool_utils.start_display", lambda: calls.append("start_display") or True
+    )
     monkeypatch.setattr("src.common.tool_utils.stop_display", lambda: calls.append("stop_display"))
+
     async def fake_playwright_start():
         calls.append("playwright_start")
 
@@ -1956,7 +2002,10 @@ async def test_heavy_lifespan_starts_workers(monkeypatch):
 
     monkeypatch.setattr("src.core.playwright_manager.start", fake_playwright_start)
     monkeypatch.setattr("src.core.playwright_manager.shutdown", fake_playwright_shutdown)
-    monkeypatch.setattr("src.worker.job_processor.start_workers", lambda: calls.append("start_workers"))
+    monkeypatch.setattr(
+        "src.worker.job_processor.start_workers", lambda: calls.append("start_workers")
+    )
+
     async def fake_stop_workers():
         calls.append("stop_workers")
 
@@ -1970,7 +2019,15 @@ async def test_heavy_lifespan_starts_workers(monkeypatch):
     async with app.router.lifespan_context(app):
         assert calls == ["ensure_job_folder", "start_display", "playwright_start", "start_workers"]
 
-    assert calls == ["ensure_job_folder", "start_display", "playwright_start", "start_workers", "stop_workers", "playwright_shutdown", "stop_display"]
+    assert calls == [
+        "ensure_job_folder",
+        "start_display",
+        "playwright_start",
+        "start_workers",
+        "stop_workers",
+        "playwright_shutdown",
+        "stop_display",
+    ]
 
 
 @pytest.mark.asyncio
@@ -2019,8 +2076,12 @@ async def test_heavy_lifespan_recovers_before_workers_and_submissions(monkeypatc
     monkeypatch.setattr(main_module, "ResourceMonitor", FakeMonitor)
     monkeypatch.setattr(main_module.tool_utils, "ensure_job_folder", lambda: calls.append("ensure"))
     monkeypatch.setattr(main_module.state_manager, "recover_persisted_jobs", fake_recover)
-    monkeypatch.setattr(main_module.tool_utils, "start_display", lambda: calls.append("display") or True)
-    monkeypatch.setattr(main_module.tool_utils, "stop_display", lambda: calls.append("stop_display"))
+    monkeypatch.setattr(
+        main_module.tool_utils, "start_display", lambda: calls.append("display") or True
+    )
+    monkeypatch.setattr(
+        main_module.tool_utils, "stop_display", lambda: calls.append("stop_display")
+    )
     monkeypatch.setattr(main_module.playwright_manager, "start", fake_playwright_start)
     monkeypatch.setattr(main_module.playwright_manager, "shutdown", fake_playwright_shutdown)
     monkeypatch.setattr(main_module.job_queue, "restore_jobs", fake_restore)
@@ -2055,7 +2116,9 @@ async def test_lightweight_lifespan_recovers_queue_without_enabling_submissions(
 
     monkeypatch.setattr(main_module.tool_utils, "ensure_job_folder", lambda: calls.append("ensure"))
     monkeypatch.setattr(main_module.state_manager, "recover_persisted_jobs", fake_recover)
-    monkeypatch.setattr(main_module.job_queue, "restore_jobs", lambda jobs: calls.append(("restore", jobs)))
+    monkeypatch.setattr(
+        main_module.job_queue, "restore_jobs", lambda jobs: calls.append(("restore", jobs))
+    )
     monkeypatch.setattr(main_module.job_processor, "start_workers", lambda: calls.append("workers"))
     monkeypatch.setattr(main_module.tool_utils, "periodic_cleanup", lambda: asyncio.sleep(0))
     monkeypatch.setenv("RUN_HEAVY_STARTUP", "false")
@@ -2075,7 +2138,9 @@ async def test_recovery_failure_prevents_downstream_startup(monkeypatch):
 
     monkeypatch.setattr(main_module.tool_utils, "ensure_job_folder", lambda: calls.append("ensure"))
     monkeypatch.setattr(main_module.state_manager, "recover_persisted_jobs", fail_recovery)
-    monkeypatch.setattr(main_module.tool_utils, "start_display", lambda: calls.append("display") or True)
+    monkeypatch.setattr(
+        main_module.tool_utils, "start_display", lambda: calls.append("display") or True
+    )
     monkeypatch.setattr(main_module.playwright_manager, "start", lambda: calls.append("browser"))
     monkeypatch.setattr(main_module.job_queue, "restore_jobs", lambda _jobs: calls.append("queue"))
     monkeypatch.setattr(main_module.job_processor, "start_workers", lambda: calls.append("workers"))
@@ -2105,10 +2170,16 @@ async def test_start_workers_rejects_non_positive_pool(monkeypatch, worker_count
 async def test_lifespan_completes_teardown_when_worker_shutdown_fails(monkeypatch):
     calls = []
 
-    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
-    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display") or True)
+    monkeypatch.setattr(
+        "src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder")
+    )
+    monkeypatch.setattr(
+        "src.common.tool_utils.start_display", lambda: calls.append("start_display") or True
+    )
     monkeypatch.setattr("src.common.tool_utils.stop_display", lambda: calls.append("stop_display"))
-    monkeypatch.setattr("src.worker.job_processor.start_workers", lambda: calls.append("start_workers"))
+    monkeypatch.setattr(
+        "src.worker.job_processor.start_workers", lambda: calls.append("start_workers")
+    )
     monkeypatch.setattr("src.common.tool_utils.periodic_cleanup", lambda: asyncio.sleep(0))
     monkeypatch.setenv("RUN_HEAVY_STARTUP", "true")
 
@@ -2129,16 +2200,30 @@ async def test_lifespan_completes_teardown_when_worker_shutdown_fails(monkeypatc
     async with app.router.lifespan_context(app):
         pass
 
-    assert calls == ["ensure_job_folder", "start_display", "playwright_start", "start_workers", "stop_workers", "playwright_shutdown", "stop_display"]
+    assert calls == [
+        "ensure_job_folder",
+        "start_display",
+        "playwright_start",
+        "start_workers",
+        "stop_workers",
+        "playwright_shutdown",
+        "stop_display",
+    ]
 
 
 @pytest.mark.asyncio
 async def test_heavy_lifespan_refuses_headful_browser_when_display_fails(monkeypatch):
     calls = []
 
-    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
-    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display") or False)
-    monkeypatch.setattr("src.worker.job_processor.start_workers", lambda: calls.append("start_workers"))
+    monkeypatch.setattr(
+        "src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder")
+    )
+    monkeypatch.setattr(
+        "src.common.tool_utils.start_display", lambda: calls.append("start_display") or False
+    )
+    monkeypatch.setattr(
+        "src.worker.job_processor.start_workers", lambda: calls.append("start_workers")
+    )
     monkeypatch.setenv("RUN_HEAVY_STARTUP", "true")
 
     async def fake_playwright_start():
@@ -2160,8 +2245,10 @@ async def test_heavy_lifespan_unwinds_resources_when_browser_start_fails(monkeyp
     class FakeMonitor:
         def __init__(self, **_kwargs):
             pass
+
         def start(self):
             calls.append("monitor_start")
+
         def stop(self):
             calls.append("monitor_stop")
 
@@ -2173,8 +2260,12 @@ async def test_heavy_lifespan_unwinds_resources_when_browser_start_fails(monkeyp
         calls.append("playwright_shutdown")
 
     monkeypatch.setattr("src.main.ResourceMonitor", FakeMonitor)
-    monkeypatch.setattr("src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder"))
-    monkeypatch.setattr("src.common.tool_utils.start_display", lambda: calls.append("start_display") or True)
+    monkeypatch.setattr(
+        "src.common.tool_utils.ensure_job_folder", lambda: calls.append("ensure_job_folder")
+    )
+    monkeypatch.setattr(
+        "src.common.tool_utils.start_display", lambda: calls.append("start_display") or True
+    )
     monkeypatch.setattr("src.common.tool_utils.stop_display", lambda: calls.append("stop_display"))
     monkeypatch.setattr("src.core.playwright_manager.start", failing_playwright_start)
     monkeypatch.setattr("src.core.playwright_manager.shutdown", fake_playwright_shutdown)
@@ -2184,7 +2275,15 @@ async def test_heavy_lifespan_unwinds_resources_when_browser_start_fails(monkeyp
         async with app.router.lifespan_context(app):
             pass
 
-    assert calls == ["monitor_start", "ensure_job_folder", "start_display", "playwright_start", "playwright_shutdown", "stop_display", "monitor_stop"]
+    assert calls == [
+        "monitor_start",
+        "ensure_job_folder",
+        "start_display",
+        "playwright_start",
+        "playwright_shutdown",
+        "stop_display",
+        "monitor_stop",
+    ]
 
 
 @pytest.mark.asyncio
@@ -2225,16 +2324,28 @@ async def test_stop_workers_can_cancel_without_draining_dead_browser_queue(monke
 
 
 def test_systemd_deploy_serializes_production_updates():
-    workflow = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "systemd-deploy.yaml"
-    service = Path(__file__).resolve().parents[1] / "example" / "playwright-multi-crawler.service"
-    content = workflow.read_text(encoding="utf-8")
-    service_content = service.read_text(encoding="utf-8")
+    repository_root = Path(__file__).resolve().parents[1]
+    workflow = repository_root / ".github" / "workflows" / "systemd-deploy.yaml"
+    service = repository_root / "example" / "playwright-multi-crawler.service"
+    installer = repository_root / "config" / "install_dependencies.sh"
 
-    assert "concurrency:" in content
-    assert "group: playwright-multi-crawler-production" in content
-    assert "cancel-in-progress: false" in content
-    assert "KillMode=mixed" in content
+    workflow_content = workflow.read_text(encoding="utf-8")
+    service_content = service.read_text(encoding="utf-8")
+    installer_content = installer.read_text(encoding="utf-8")
+
+    assert "group: playwright-multi-crawler-production" in workflow_content
+    assert "cancel-in-progress: false" in workflow_content
+    assert "DEPLOY_SHA: ${{ github.sha }}" in workflow_content
+    assert 'git merge-base --is-ancestor "$DEPLOY_SHA" origin/main' in workflow_content
+    assert 'git reset --hard "$DEPLOY_SHA"' in workflow_content
+    assert "EnvironmentFile=$DEPLOY_PATH/.env" in workflow_content
+    assert "ExecStart=$DEPLOY_PATH/.venv/bin/python -m src.main" in workflow_content
+    assert "KillMode=mixed" in workflow_content
+    assert "EnvironmentFile=/opt/playwright-multi-crawler/.env" in service_content
+    assert "ExecStart=/opt/playwright-multi-crawler/.venv/bin/python -m src.main" in service_content
     assert "KillMode=mixed" in service_content
+    assert "uv sync --locked --no-dev" in installer_content
+
 
 @pytest.mark.asyncio
 async def test_submit_additional_file_accepts_safe_filename(client: httpx.AsyncClient):
@@ -2243,10 +2354,10 @@ async def test_submit_additional_file_accepts_safe_filename(client: httpx.AsyncC
     additional_content = "safe payload"
 
     files = [
-        ('script_file', ('dummy_script.py', DUMMY_SCRIPT_CONTENT, 'text/x-python')),
-        ('additional_files', (additional_name, additional_content, 'text/plain')),
+        ("script_file", ("dummy_script.py", DUMMY_SCRIPT_CONTENT, "text/x-python")),
+        ("additional_files", (additional_name, additional_content, "text/plain")),
     ]
-    data = {'jobname': job_name}
+    data = {"jobname": job_name}
 
     response = await client.post("/api/jobs/submit", data=data, files=files)
 

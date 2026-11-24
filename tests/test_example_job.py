@@ -150,7 +150,9 @@ def test_bundled_client_run_prints_terminal_result(monkeypatch, capsys):
     monkeypatch.setattr(
         job,
         "get_job_results",
-        lambda *_args, **_kwargs: job.JOB_RESULTS_RESPONSE_ADAPTER.validate_python(terminal_payload),
+        lambda *_args, **_kwargs: job.JOB_RESULTS_RESPONSE_ADAPTER.validate_python(
+            terminal_payload
+        ),
     )
 
     with _client(lambda _request: pytest.fail("network must not be called")) as client:
@@ -162,3 +164,17 @@ def test_bundled_client_run_prints_terminal_result(monkeypatch, capsys):
     assert output["result"] == terminal_payload["result"]
     assert "submitted_at" in output
     assert "run_duration_seconds" in output
+
+
+def test_bundled_client_rejects_unsafe_output_filename(tmp_path):
+    with _client(lambda _request: pytest.fail("network must not be called")) as client:
+        with pytest.raises(ValueError, match="unsafe output path component"):
+            job.download_files(
+                client,
+                "job-1",
+                {"../escape.txt": "/api/jobs/download/job-1/escape.txt"},
+                server="http://service.local",
+                output_dir=tmp_path,
+            )
+
+    assert not (tmp_path / "escape.txt").exists()

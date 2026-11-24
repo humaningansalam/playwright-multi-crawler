@@ -1,24 +1,20 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 
-echo "Updating package lists..."
-sudo apt-get update
-
-echo "Installing required Linux packages..."
-sudo apt-get install -y \
-        xserver-xephyr
-
-echo "Installing Python packages..."
-if command -v uv &> /dev/null; then
-    echo "uv found. Syncing dependencies..."
-    uv sync
-    
-    echo "Installing Playwright browsers..."
-    uv run playwright install --with-deps chromium
-else
-    echo "Error: uv is not installed. Please install uv first."
-    echo "You can install it by running: curl -LsSf https://astral.sh/uv/install.sh | sh"
+if ! command -v uv >/dev/null 2>&1; then
+    printf '%s\n' 'uv is required. Install it before running this script.' >&2
     exit 1
 fi
 
-echo "All dependencies installed successfully."
+printf '%s\n' 'Installing Xephyr...'
+sudo apt-get update
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
+    -y \
+    --no-install-recommends \
+    xserver-xephyr
+
+printf '%s\n' 'Syncing locked runtime dependencies...'
+uv sync --locked --no-dev
+
+printf '%s\n' 'Installing Playwright Chromium and OS dependencies...'
+uv run --locked --no-dev playwright install --with-deps chromium

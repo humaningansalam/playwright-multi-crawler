@@ -3,45 +3,51 @@ import logging
 import os
 import signal
 import socket
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from playwright.async_api import Browser, Playwright, async_playwright
+
 from src.config import BROWSER_EXECUTABLE_PATH, CDP_PORT
+
+logger = logging.getLogger(__name__)
 
 CDP_HOST = "127.0.0.1"
 CDP_READY_TIMEOUT_SECONDS = 10.0
 CDP_READY_POLL_INTERVAL_SECONDS = 0.1
 CDP_REQUEST_TIMEOUT_SECONDS = 1.0
 
-_playwright: Optional[Playwright] = None
-_browser: Optional[Browser] = None
+_playwright: Playwright | None = None
+_browser: Browser | None = None
 _shutting_down = False
-_requested_exit_code: Optional[int] = None
+_requested_exit_code: int | None = None
 _exit_process = os._exit
 _signal_process = os.kill
 
 
 def _on_browser_disconnected(_disconnected_browser: Browser) -> None:
     global _requested_exit_code
+
     if _shutting_down:
         return
+
     _requested_exit_code = 1
-    logging.critical("Shared Chromium disconnected unexpectedly; requesting service recovery.")
+    logger.critical("Shared Chromium disconnected unexpectedly; requesting service recovery.")
     try:
         _signal_process(os.getpid(), signal.SIGTERM)
     except OSError:
-        logging.exception("Failed to request graceful service shutdown; exiting immediately.")
+        logger.exception("Could not request graceful shutdown; exiting immediately.")
         _exit_process(_requested_exit_code)
 
 
-def requested_exit_code() -> Optional[int]:
+def requested_exit_code() -> int | None:
+    """Return the process exit code requested by a browser lifecycle failure."""
     return _requested_exit_code
 
 
 def _browser_launch_options() -> dict[str, Any]:
-    options: dict[str, Any] = {
+    launch_options: dict[str, Any] = {
         "headless": False,
         "handle_sigint": False,
         "handle_sigterm": False,
@@ -55,8 +61,8 @@ def _browser_launch_options() -> dict[str, Any]:
         ],
     }
     if BROWSER_EXECUTABLE_PATH:
-        options["executable_path"] = BROWSER_EXECUTABLE_PATH
-    return options
+        launch_options["executable_path"] = BROWSER_EXECUTABLE_PATH
+    return launch_options
 
 
 def _cdp_base_url() -> str:
@@ -64,13 +70,13 @@ def _cdp_base_url() -> str:
 
 
 def _assert_cdp_port_available() -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate_socket:
         try:
-            candidate.bind((CDP_HOST, CDP_PORT))
-        except OSError as exc:
+            candidate_socket.bind((CDP_HOST, CDP_PORT))
+        except OSError as exception:
             raise RuntimeError(
                 f"CDP endpoint {CDP_HOST}:{CDP_PORT} is already in use"
-            ) from exc
+            ) from exception
 
 
 async def _fetch_cdp_version() -> dict[str, Any]:
@@ -80,21 +86,22 @@ async def _fetch_cdp_version() -> dict[str, Any]:
     ) as client:
         response = await client.get(f"{_cdp_base_url()}/json/version")
         response.raise_for_status()
-        payload = response.json()
-    if not isinstance(payload, dict):
+        version_payload = response.json()
+
+    if not isinstance(version_payload, dict):
         raise ValueError("CDP /json/version response must be a JSON object")
-    return payload
+    return version_payload
 
 
 async def _wait_for_cdp_ready() -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + CDP_READY_TIMEOUT_SECONDS
-    last_error: Optional[Exception] = None
+    event_loop = asyncio.get_running_loop()
+    deadline = event_loop.time() + CDP_READY_TIMEOUT_SECONDS
+    last_error: Exception | None = None
 
     while True:
         try:
-            payload = await _fetch_cdp_version()
-            websocket_url = payload.get("webSocketDebuggerUrl")
+            version_payload = await _fetch_cdp_version()
+            websocket_url = version_payload.get("webSocketDebuggerUrl")
             if not isinstance(websocket_url, str) or not websocket_url:
                 raise ValueError("CDP /json/version is missing webSocketDebuggerUrl")
 
@@ -104,18 +111,15 @@ async def _wait_for_cdp_ready() -> None:
                 or parsed_url.hostname != CDP_HOST
                 or parsed_url.port != CDP_PORT
             ):
-                raise ValueError(
-                    "CDP webSocketDebuggerUrl does not target "
-                    f"{CDP_HOST}:{CDP_PORT}"
-                )
+                raise ValueError(f"CDP webSocketDebuggerUrl does not target {CDP_HOST}:{CDP_PORT}")
             return
-        except (httpx.HTTPError, TypeError, ValueError) as exc:
-            last_error = exc
+        except (httpx.HTTPError, TypeError, ValueError) as exception:
+            last_error = exception
 
-        remaining = deadline - loop.time()
-        if remaining <= 0:
+        remaining_seconds = deadline - event_loop.time()
+        if remaining_seconds <= 0:
             break
-        await asyncio.sleep(min(CDP_READY_POLL_INTERVAL_SECONDS, remaining))
+        await asyncio.sleep(min(CDP_READY_POLL_INTERVAL_SECONDS, remaining_seconds))
 
     raise RuntimeError(
         f"CDP endpoint {_cdp_base_url()} did not become ready: {last_error}"
@@ -123,37 +127,35 @@ async def _wait_for_cdp_ready() -> None:
 
 
 async def _close_resources() -> None:
-    global _playwright, _browser, _shutting_down, _requested_exit_code
+    global _browser, _playwright, _shutting_down
+
     _shutting_down = True
 
-    browser = _browser
-    _browser = None
-    if browser:
+    browser, _browser = _browser, None
+    if browser is not None:
         try:
             await browser.close()
-            logging.info("Browser closed.")
         except Exception:
-            logging.exception("Failed to close browser.")
+            logger.exception("Failed to close Chromium.")
+        else:
+            logger.info("Chromium closed.")
 
-    playwright = _playwright
-    _playwright = None
-    if playwright:
+    playwright, _playwright = _playwright, None
+    if playwright is not None:
         try:
             await playwright.stop()
-            logging.info("Playwright stopped.")
         except Exception:
-            logging.exception("Failed to stop Playwright.")
+            logger.exception("Failed to stop Playwright.")
+        else:
+            logger.info("Playwright stopped.")
 
 
 async def start() -> None:
-    """
-    Playwright 브라우저를 '서버 모드'로 시작합니다.
-    headless=False로 설정하여 화면을 띄우고,
-    --remote-debugging-port 옵션으로 외부 프로세스 접속을 허용합니다.
-    """
-    global _playwright, _browser, _shutting_down, _requested_exit_code
-    if _playwright:
-        logging.warning("Playwright already started.")
+    """Launch the shared headful Chromium instance and verify its CDP endpoint."""
+    global _browser, _playwright, _requested_exit_code, _shutting_down
+
+    if _playwright is not None:
+        logger.warning("Playwright is already running.")
         return
 
     try:
@@ -161,22 +163,22 @@ async def start() -> None:
         _requested_exit_code = None
         _assert_cdp_port_available()
         _playwright = await async_playwright().start()
-        logging.info(f"Launching Playwright Browser Server on port {CDP_PORT}...")
+        logger.info("Launching shared Chromium on CDP port %s.", CDP_PORT)
         _browser = await _playwright.chromium.launch(**_browser_launch_options())
         await _wait_for_cdp_ready()
         _browser.on("disconnected", _on_browser_disconnected)
-        logging.info(f"Browser Server launched. Listening at {_cdp_base_url()}")
-    except Exception as e:
-        logging.critical(f"Failed to launch browser server: {e}")
+        logger.info("Shared Chromium is ready at %s.", _cdp_base_url())
+    except Exception as exception:
+        logger.critical("Failed to launch shared Chromium.", exc_info=True)
         await _close_resources()
-        raise RuntimeError(f"Browser launch failed: {e}") from e
+        raise RuntimeError(f"Browser launch failed: {exception}") from exception
 
 
 async def shutdown() -> None:
-    """Playwright 관련 자원 정리"""
+    """Close the shared browser and Playwright runtime."""
     await _close_resources()
 
 
 def is_browser_connected() -> bool:
-    """브라우저 프로세스 연결 상태 확인"""
+    """Return whether the shared Chromium connection is alive."""
     return _browser is not None and _browser.is_connected()

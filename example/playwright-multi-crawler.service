@@ -1,14 +1,21 @@
 [Unit]
-Description=FastAPI Application Service
-After=network.target graphical.target
+Description=Playwright Multi Crawler
+Wants=network-online.target
+After=network-online.target graphical.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
-User=your_user 
-WorkingDirectory=/path/to/your/deployment/folder
-Environment="PATH=/home/your_user/.local/bin:/usr/local/bin:/usr/bin"
-ExecStart=/home/your_user/.local/bin/uv run python -m src.main
+Type=simple
+User=playwright-crawler
+WorkingDirectory=/opt/playwright-multi-crawler
+EnvironmentFile=/opt/playwright-multi-crawler/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/playwright-multi-crawler/.venv/bin/python -m src.main
 KillMode=mixed
-Restart=always
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=10
 
 [Install]
 WantedBy=graphical.target

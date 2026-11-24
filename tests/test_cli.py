@@ -1,6 +1,5 @@
 import argparse
 import json
-from pathlib import Path
 
 import httpx
 import pytest
@@ -60,7 +59,7 @@ def test_run_submits_follows_logs_and_downloads(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert captured.out.startswith("hello\n")
-    assert json.loads(captured.out[captured.out.index("{"):])["status"] == JobStatus.COMPLETED
+    assert json.loads(captured.out[captured.out.index("{") :])["status"] == JobStatus.COMPLETED
     assert "job_id=job-1" in captured.err
     assert "warn" in captured.err
     assert (tmp_path / "downloads" / "job-1" / "output.txt").read_bytes() == b"artifact"
@@ -130,6 +129,11 @@ def test_download_rejects_other_origin():
         cli._download_url("http://service.local", "http://other.local/file")
 
 
+def test_download_rejects_same_origin_non_artifact_path():
+    with pytest.raises(cli.CrawlerCliError, match="invalid download URL"):
+        cli._download_url("http://service.local", "/metrics")
+
+
 def test_run_rejects_missing_script(tmp_path):
     args = argparse.Namespace(
         script=tmp_path / "missing.py",
@@ -156,7 +160,9 @@ def test_run_cancels_remote_job_when_log_follow_is_interrupted(tmp_path, monkeyp
             return httpx.Response(200, json={"job_id": "job-1", "status": "CANCELLED"})
         raise AssertionError(request.url)
 
-    monkeypatch.setattr(cli, "follow_logs", lambda *_args: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr(
+        cli, "follow_logs", lambda *_args: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
     args = argparse.Namespace(
         script=script,
         job_name="demo",
@@ -173,3 +179,29 @@ def test_run_cancels_remote_job_when_log_follow_is_interrupted(tmp_path, monkeyp
         ("POST", "/api/jobs/job-1/cancel"),
     ]
     assert "Cancelling remote job job-1" in capsys.readouterr().err
+
+
+def test_download_rejects_unsafe_output_filename(tmp_path):
+    def handler(request):
+        if request.url.path.endswith("/results/job-1"):
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job-1",
+                    "status": "COMPLETED",
+                    "result": None,
+                    "files": {"../escape.txt": "/api/jobs/download/job-1/escape.txt"},
+                },
+            )
+        pytest.fail("unsafe filename must be rejected before downloading")
+
+    with _client(handler) as client:
+        with pytest.raises(cli.CrawlerCliError, match="unsafe output path component"):
+            cli.fetch_result_and_download(
+                client,
+                "http://service.local",
+                "job-1",
+                tmp_path,
+            )
+
+    assert not (tmp_path / "escape.txt").exists()

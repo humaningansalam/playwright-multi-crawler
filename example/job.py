@@ -2,16 +2,18 @@ import json
 import logging
 import os
 import time
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import BinaryIO, Iterator, Sequence
+from typing import BinaryIO
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from pydantic import ValidationError
 
+from src.common.download_paths import output_child, write_download
 from src.models.job import (
     JOB_RESULTS_RESPONSE_ADAPTER,
     JobProcessingResponse,
@@ -21,11 +23,13 @@ from src.models.job import (
     JobSubmitResponse,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 SERVER_URL = os.getenv("PLAYWRIGHT_URL", "http://localhost:5000")
 POLL_INTERVAL_SECONDS = 1.0
 MAX_POLL_ATTEMPTS = 600
+
+MultipartFile = tuple[str, tuple[str, BinaryIO, str]]
 
 
 class PollOutcome(str, Enum):
@@ -50,21 +54,31 @@ def _api_url(server: str, path: str) -> str:
 
 
 @contextmanager
-def _open_uploads(script: Path, additional: Sequence[Path]) -> Iterator[list[tuple]]:
-    opened: list[BinaryIO] = []
-    files: list[tuple] = []
+def _open_uploads(
+    script_path: Path,
+    additional_paths: Sequence[Path],
+) -> Iterator[list[MultipartFile]]:
+    opened_files: list[BinaryIO] = []
+    multipart_files: list[MultipartFile] = []
     try:
-        script_handle = script.open("rb")
-        opened.append(script_handle)
-        files.append(("script_file", (script.name, script_handle, "text/x-python")))
-        for path in additional:
-            handle = path.open("rb")
-            opened.append(handle)
-            files.append(("additional_files", (path.name, handle, "application/octet-stream")))
-        yield files
+        script_file = script_path.open("rb")
+        opened_files.append(script_file)
+        multipart_files.append(("script_file", (script_path.name, script_file, "text/x-python")))
+
+        for additional_path in additional_paths:
+            additional_file = additional_path.open("rb")
+            opened_files.append(additional_file)
+            multipart_files.append(
+                (
+                    "additional_files",
+                    (additional_path.name, additional_file, "application/octet-stream"),
+                )
+            )
+
+        yield multipart_files
     finally:
-        for handle in opened:
-            handle.close()
+        for opened_file in opened_files:
+            opened_file.close()
 
 
 def submit_job(
@@ -77,20 +91,26 @@ def submit_job(
 ) -> str:
     if not script_path.is_file():
         raise FileNotFoundError(f"Crawl script not found: {script_path}")
-    missing = [path for path in additional_files if not path.is_file()]
-    if missing:
-        raise FileNotFoundError(f"Additional file not found: {missing[0]}")
 
-    with _open_uploads(script_path, additional_files) as files:
-        response = client.post(
+    missing_paths = [path for path in additional_files if not path.is_file()]
+    if missing_paths:
+        raise FileNotFoundError(f"Additional file not found: {missing_paths[0]}")
+
+    with _open_uploads(script_path, additional_files) as multipart_files:
+        submission_response = client.post(
             _api_url(server, "/api/jobs/submit"),
             data={"jobname": job_name},
-            files=files,
+            files=multipart_files,
         )
-    response.raise_for_status()
-    submitted = JobSubmitResponse.model_validate(response.json())
-    logging.info("Job submitted: id=%s status=%s", submitted.job_id, submitted.status.value)
-    return submitted.job_id
+
+    submission_response.raise_for_status()
+    submitted_job = JobSubmitResponse.model_validate(submission_response.json())
+    logger.info(
+        "Job submitted: id=%s status=%s",
+        submitted_job.job_id,
+        submitted_job.status.value,
+    )
+    return submitted_job.job_id
 
 
 def poll_job_status(
@@ -102,28 +122,29 @@ def poll_job_status(
     interval_seconds: float = POLL_INTERVAL_SECONDS,
 ) -> PollResult:
     status_url = _api_url(server, f"/api/jobs/status/{job_id}")
-    for attempt in range(max_attempts):
+    for attempt_index in range(max_attempts):
         try:
-            response = client.get(status_url)
-            if response.status_code == 404:
+            status_http_response = client.get(status_url)
+            if status_http_response.status_code == 404:
                 return PollResult(PollOutcome.NOT_FOUND)
-            response.raise_for_status()
-            status_response = JobStatusResponse.model_validate(response.json())
+            status_http_response.raise_for_status()
+            job_status = JobStatusResponse.model_validate(status_http_response.json())
         except httpx.TimeoutException:
             time.sleep(interval_seconds)
             continue
         except ValidationError:
             return PollResult(PollOutcome.INVALID_RESPONSE)
 
-        logging.info(
+        logger.info(
             "Attempt %s/%s: job status=%s",
-            attempt + 1,
+            attempt_index + 1,
             max_attempts,
-            status_response.status.value,
+            job_status.status.value,
         )
-        if status_response.status.is_terminal:
-            return PollResult(PollOutcome.TERMINAL, status_response.status)
+        if job_status.status.is_terminal:
+            return PollResult(PollOutcome.TERMINAL, job_status.status)
         time.sleep(interval_seconds)
+
     return PollResult(PollOutcome.TIMEOUT)
 
 
@@ -133,9 +154,9 @@ def cancel_job(
     *,
     server: str = SERVER_URL,
 ) -> JobStatusResponse:
-    response = client.post(_api_url(server, f"/api/jobs/{job_id}/cancel"))
-    response.raise_for_status()
-    return JobStatusResponse.model_validate(response.json())
+    cancellation_response = client.post(_api_url(server, f"/api/jobs/{job_id}/cancel"))
+    cancellation_response.raise_for_status()
+    return JobStatusResponse.model_validate(cancellation_response.json())
 
 
 def get_job_results(
@@ -144,21 +165,31 @@ def get_job_results(
     *,
     server: str = SERVER_URL,
 ) -> JobResultsResponse | None:
-    response = client.get(_api_url(server, f"/api/jobs/results/{job_id}"))
-    if response.status_code == 404:
+    results_response = client.get(_api_url(server, f"/api/jobs/results/{job_id}"))
+    if results_response.status_code == 404:
         return None
-    response.raise_for_status()
-    return JOB_RESULTS_RESPONSE_ADAPTER.validate_python(response.json())
+    results_response.raise_for_status()
+    return JOB_RESULTS_RESPONSE_ADAPTER.validate_python(results_response.json())
 
 
-def _download_url(server: str, path: str) -> str:
-    base = urlparse(server)
-    candidate = urlparse(urljoin(f"{server.rstrip('/')}/", path))
-    if candidate.scheme != base.scheme or candidate.netloc != base.netloc:
-        raise ValueError(f"Server returned a download URL outside {base.netloc}")
-    if not candidate.path.startswith("/api/jobs/download/"):
-        raise ValueError(f"Server returned an invalid download URL: {path}")
-    return candidate.geturl()
+def _download_url(server: str, download_path: str) -> str:
+    server_url = urlparse(server)
+    candidate_url = urlparse(urljoin(f"{server.rstrip('/')}/", download_path))
+    if candidate_url.scheme != server_url.scheme or candidate_url.netloc != server_url.netloc:
+        raise ValueError(f"Server returned a download URL outside {server_url.netloc}")
+    if not candidate_url.path.startswith("/api/jobs/download/"):
+        raise ValueError(f"Server returned an invalid download URL: {download_path}")
+    return candidate_url.geturl()
+
+
+def _download_file(
+    client: httpx.Client,
+    download_url: str,
+    destination: Path,
+) -> None:
+    with client.stream("GET", download_url) as download_response:
+        download_response.raise_for_status()
+        write_download(destination, download_response.iter_bytes())
 
 
 def download_files(
@@ -169,12 +200,18 @@ def download_files(
     server: str = SERVER_URL,
     output_dir: Path = Path("downloads"),
 ) -> None:
-    job_output = output_dir / job_id
+    job_output = output_child(output_dir, job_id)
+    planned_downloads = [
+        (
+            _download_url(server, download_path),
+            output_child(job_output, filename),
+        )
+        for filename, download_path in files.items()
+    ]
+
     job_output.mkdir(parents=True, exist_ok=True)
-    for filename, path in files.items():
-        response = client.get(_download_url(server, path))
-        response.raise_for_status()
-        (job_output / filename).write_bytes(response.content)
+    for download_url, destination in planned_downloads:
+        _download_file(client, download_url, destination)
 
 
 def run(client: httpx.Client) -> int:
@@ -182,31 +219,36 @@ def run(client: httpx.Client) -> int:
     try:
         poll_result = poll_job_status(client, job_id)
     except KeyboardInterrupt:
-        logging.info("Cancelling remote job %s", job_id)
+        logger.info("Cancelling remote job %s", job_id)
         cancel_job(client, job_id)
         return 130
 
     if poll_result.outcome != PollOutcome.TERMINAL:
-        logging.error("Job did not finish: %s", poll_result.outcome.value)
+        logger.error("Job did not finish: %s", poll_result.outcome.value)
         return 1
 
-    result = get_job_results(client, job_id)
-    if result is None or isinstance(result, JobProcessingResponse):
-        logging.error("Terminal job result is unavailable")
+    job_result = get_job_results(client, job_id)
+    if job_result is None or isinstance(job_result, JobProcessingResponse):
+        logger.error("Terminal job result is unavailable")
         return 1
-    if result.files:
-        download_files(client, job_id, result.files)
-    print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
-    return 0 if result.status == JobStatus.COMPLETED else 1
+    if job_result.files:
+        download_files(client, job_id, job_result.files)
+
+    print(json.dumps(job_result.model_dump(mode="json"), ensure_ascii=False, indent=2))
+    return 0 if job_result.status == JobStatus.COMPLETED else 1
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
     try:
         with httpx.Client(timeout=httpx.Timeout(30, read=60)) as client:
             raise SystemExit(run(client))
-    except (FileNotFoundError, OSError, ValueError, ValidationError, httpx.HTTPError) as exc:
-        logging.error("Example client failed: %s", exc)
-        raise SystemExit(1) from exc
+    except (FileNotFoundError, OSError, ValueError, ValidationError, httpx.HTTPError) as exception:
+        logger.error("Example client failed: %s", exception)
+        raise SystemExit(1) from exception
 
 
 if __name__ == "__main__":
