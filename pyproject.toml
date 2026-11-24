@@ -1,6 +1,6 @@
 [project]
 name = "playwright-multi-crawler"
-version = "0.4.2"
+version = "0.4.3"
 description = "Submit and run isolated Playwright automation jobs through a FastAPI service."
 readme = "README.md"
 requires-python = ">=3.11"

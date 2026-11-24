@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.3] - 2026-11-24
+
+### Added
+
+- Advertise the private-job contract and protect job status, cancellation, logs, results, and downloads with a per-job access token; persist only its digest.
+- Store private multipart inputs separately from result artifacts, restrict their filesystem permissions, and purge them on terminal transitions or interrupted recovery.
+
+### Fixed
+
+- Reject legacy public Tistory credential submissions and hide old Tistory jobs from the API; discard known legacy credential files during recovery.
+- Disable job-response caching to prevent shared caches from retaining sensitive results.
+
 ## [0.4.2] - 2026-11-24
 
 ### Changed

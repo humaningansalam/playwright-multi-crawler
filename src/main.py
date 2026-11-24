@@ -234,6 +234,15 @@ async def request_validation_error_handler(
     return JSONResponse(status_code=422, content=error_response.model_dump(mode="json"))
 
 
+@app.middleware("http")
+async def disable_job_response_caching(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/jobs/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers.add_vary_header("X-Job-Token")
+    return response
+
+
 app.include_router(jobs_api.router)
 app.include_router(health_api.router)
 app.include_router(metrics_api.router)
