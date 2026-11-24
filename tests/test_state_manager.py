@@ -1,9 +1,10 @@
-import pytest
 import asyncio
 import json
 import threading
 import time
 from datetime import datetime, timedelta
+
+import pytest
 
 # 테스트 대상 모듈 임포트
 from src.core import state_manager as state
@@ -41,6 +42,7 @@ def _write_persisted_job(
     state_path.write_text(persisted.model_dump_json(indent=2) + "\n", encoding="utf-8")
     return job_dir, state_path
 
+
 @pytest.mark.asyncio
 async def test_initial_status_and_update(tmp_path):
     """상태 초기화 및 업데이트 기능 테스트"""
@@ -68,7 +70,9 @@ async def test_initial_status_and_update(tmp_path):
     # 상태 업데이트 (COMPLETED with result)
     result_data = {"key": "value"}
     duration = 5.5
-    await state.update_job_status(job_id, JobStatus.COMPLETED, result=result_data, duration=duration)
+    await state.update_job_status(
+        job_id, JobStatus.COMPLETED, result=result_data, duration=duration
+    )
 
     # 최종 정보 확인
     final_info = await state.get_job_info(job_id)
@@ -431,9 +435,7 @@ async def test_concurrent_updates_preserve_disk_order(monkeypatch, tmp_path):
         original_writer(record)
 
     monkeypatch.setattr(state, "_write_state_file_atomic", ordered_writer)
-    running_task = asyncio.create_task(
-        state.update_job_status(job_id, JobStatus.RUNNING)
-    )
+    running_task = asyncio.create_task(state.update_job_status(job_id, JobStatus.RUNNING))
     assert await asyncio.to_thread(running_started.wait, 5)
     completed_task = asyncio.create_task(
         state.update_job_status(job_id, JobStatus.COMPLETED, result={"ok": True})
@@ -650,7 +652,9 @@ async def test_recovery_rejects_unsupported_schema_version(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("schema_fragment", ["", '"schema_version": true,', '"schema_version": 1.0,'])
+@pytest.mark.parametrize(
+    "schema_fragment", ["", '"schema_version": true,', '"schema_version": 1.0,']
+)
 async def test_recovery_skips_missing_or_non_integer_schema_version_unchanged(
     tmp_path,
     schema_fragment,
@@ -784,6 +788,7 @@ async def test_recovery_requires_empty_runtime_registries(tmp_path):
 
     assert await state.get_job_info("running-job") is None
     assert state_path.read_bytes() == original
+
 
 @pytest.mark.asyncio
 async def test_submitted_job_tracking():

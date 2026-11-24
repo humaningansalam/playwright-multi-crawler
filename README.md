@@ -10,12 +10,11 @@ Playwright 기반 작업을 HTTP API로 제출하고, 공유 Chromium 브라우�
 - **운영 readiness**: `/health`는 브라우저와 워커가 모두 준비된 경우에만 성공합니다.
 
 ## 요구 사항
+
 - Python 3.11 이상
 - uv
-- FastAPI
-- Uvicorn
-- Playwright
-- xserver-xephyr
+- Playwright Chromium 실행에 필요한 OS 패키지
+- headful Chromium을 위한 Xephyr (`xserver-xephyr`)
 
 ## 설치 및 실행 방법
 
@@ -35,11 +34,17 @@ uv run python -m src.main
 RUN_HEAVY_STARTUP=false uv run python -c "import src.main; print(src.main.app.title)"
 ```
 
-## 테스트
+## 개발 검증
 
 ```bash
+uv sync --locked
+uv run ruff check src tests example
+uv run ruff format --check src tests example
 uv run pytest -q
+uv build
 ```
+
+변경 원칙과 리뷰 기준은 [CONTRIBUTING.md](CONTRIBUTING.md), 저장소 구조와 핵심 불변식은 [AGENTS.md](AGENTS.md)를 참고하세요.
 
 ## 작업 API 사용법
 
@@ -190,9 +195,32 @@ Prometheus-compatible runtime metrics는 `GET /metrics`에서 조회할 수 있�
 | `CLEANUP_INTERVAL_HOURS` | `24` | retention cleanup 실행 간격(시간) |
 | `UVICORN_RELOAD` | `false` | 개발용 Uvicorn reload 활성화 |
 | `TZ` | `Asia/Seoul` | 서비스 시간대 |
+| `DISPLAY` | unset | Xephyr가 연결할 상위 X display. 배포 workflow 기본값은 `:0`입니다. |
+| `PLAYWRIGHT_BROWSERS_PATH` | Playwright 기본값 | Chromium 설치 및 조회 경로 |
+| `APP_NAME` | `playwright-runner` | 로그/모니터링 애플리케이션 이름 |
+| `APP_ENV` | `dev` | 로그/모니터링 환경 이름 |
 | `LOG_LEVEL` | `INFO` | 애플리케이션 로그 레벨 |
+| `LOKI_URL` | unset | 선택적 Loki push endpoint |
 
-systemd 배포 workflow는 서비스 restart 뒤 최대 30초 동안 `/health`를 확인합니다. 이 검사에 실패하면 배포 job도 실패합니다.
+## systemd 배포
 
-## 라이선스
-이 프로젝트는 MIT 라이선스를 따릅니다. 자세한 내용은 LICENSE 파일을 참고하세요.
+`.github/workflows/systemd-deploy.yaml`은 `main`에 반영된 커밋만 직렬로 배포합니다. 배포 전에 lint, format check, 전체 테스트, package build를 다시 통과해야 하며, 원격 서버에서는 `uv.lock`에 고정된 runtime dependency만 설치합니다.
+
+GitHub Actions에는 다음 repository secret이 필요합니다.
+
+- `SERVER_HOST`: SSH 대상 호스트
+- `SERVER_USER`: SSH 사용자이자 systemd 서비스 사용자
+- `SERVER_SSH_KEY`: SSH 개인 키
+- `DEPLOY_PATH`: 공백 없는 절대 배포 경로
+
+`SERVER_SSH_FINGERPRINT` secret을 설정하면 SSH 호스트 키를 검증합니다. 설정을 권장합니다.
+
+다음 repository variable은 선택 사항입니다. 비어 있으면 괄호 안의 기본값을 사용합니다.
+
+- `SERVER_PORT` (`5000`)
+- `DISPLAY` (`:0`)
+- `APP_NAME` (`playwright-runner`)
+- `APP_ENV` (`production`)
+- `LOG_LEVEL` (`INFO`)
+
+원격 서버에는 `git`, `curl`, `uv`, 비대화형 `sudo` 권한이 필요합니다. workflow는 `origin/main`에 포함된 검증 대상 커밋을 배포하고, 권한 `0600`의 `.env`를 작성한 뒤 `example/playwright-multi-crawler.service`와 같은 실행 계약으로 서비스를 설치합니다. 서비스 재시작 뒤 최대 30회(1초 간격)로 `/health`를 확인하며, 실패하면 systemd 상태와 최근 journal을 출력하고 배포 job을 실패시킵니다.

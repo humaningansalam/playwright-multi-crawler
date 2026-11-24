@@ -1,29 +1,26 @@
 import asyncio
 import os
 import shutil
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 
-# src 폴더를 sys.path에 추가하여 src 내부 모듈 임포트 가능하게 함
-# (테스트 실행 환경에 따라 필요 없을 수도 있음)
-import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# FastAPI 애플리케이션 임포트
-# src.main 에서 app 객체를 가져옵니다.
 os.environ.setdefault("RUN_HEAVY_STARTUP", "false")
-os.environ.setdefault("PYTHONPATH", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Set before importing configuration so tests never clean the operator job directory.
+_test_job_root = TemporaryDirectory(prefix="crawler-tests-")
+os.environ["JOB_FOLDER"] = _test_job_root.name
 
-from src.config import JOB_FOLDER
-from src.common.metrics import metrics
-from src.core import job_queue, state_manager
+from src.common.metrics import metrics  # noqa: E402
+from src.config import JOB_FOLDER  # noqa: E402
+from src.core import job_queue, state_manager  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def mark_test_app_workers_ready(monkeypatch):
-    """API unit tests mock queue behavior and therefore opt into submission."""
+    """Allow API tests to submit jobs without starting the real browser runtime."""
     from src.main import app
 
     monkeypatch.setattr("src.core.playwright_manager.is_browser_connected", lambda: True)
@@ -31,23 +28,19 @@ def mark_test_app_workers_ready(monkeypatch):
     yield
     app.state.job_submission_enabled = False
 
+
 @pytest.fixture(scope="session")
 def event_loop():
-    """
-    pytest-asyncio가 세션 범위에서 이벤트 루프를 사용하도록 설정합니다.
-    모든 비동기 테스트는 이 루프 위에서 실행됩니다.
-    """
+    """Provide one event loop for session-scoped asynchronous fixtures."""
     policy = asyncio.get_event_loop_policy()
     loop = policy.new_event_loop()
     yield loop
     loop.close()
 
+
 @pytest_asyncio.fixture(scope="session")
 async def client():
-    """
-    FastAPI 애플리케이션에 대한 비동기 테스트 클라이언트를 생성하는 픽스처입니다.
-    'session' 범위는 테스트 세션 동안 클라이언트가 한 번만 생성되도록 합니다.
-    """
+    """Create an in-process asynchronous client for the FastAPI application."""
     from src.main import app
 
     transport = ASGITransport(app=app)
@@ -55,13 +48,23 @@ async def client():
         yield test_client
 
 
+def _remove_test_job_artifacts() -> None:
+    job_root = Path(JOB_FOLDER)
+    if not job_root.exists():
+        return
+
+    for artifact_path in job_root.iterdir():
+        if artifact_path.is_symlink() or artifact_path.is_file():
+            artifact_path.unlink()
+        elif artifact_path.is_dir():
+            shutil.rmtree(artifact_path)
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def cleanup_job_state_and_folder():
-    """
-    각 테스트 함수 실행 *전후*에 상태와 작업 폴더를 정리하는 픽스처입니다.
-    autouse=True 이므로 모든 테스트 함수에 자동으로 적용됩니다.
-    """
-    async def reset_test_state():
+    """Reset in-memory and on-disk job state around every test."""
+
+    async def reset_test_state() -> None:
         async with state_manager._state_change_lock:
             state_manager._job_status_and_results.clear()
             state_manager._submitted_jobs.clear()
@@ -71,17 +74,7 @@ async def cleanup_job_state_and_folder():
         job_queue._claimed_job_ids.clear()
         job_queue._queued_job_ids.clear()
         metrics.queued_jobs.set(0)
-
-        if os.path.exists(JOB_FOLDER):
-            for item in os.listdir(JOB_FOLDER):
-                item_path = os.path.join(JOB_FOLDER, item)
-                try:
-                    if os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
-                    elif os.path.isfile(item_path):
-                        os.unlink(item_path)
-                except Exception as e:
-                    print(f"Warning: Error cleaning up {item_path}: {e}")
+        _remove_test_job_artifacts()
 
     await reset_test_state()
     yield

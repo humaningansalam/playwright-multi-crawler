@@ -1,111 +1,128 @@
 import asyncio
 import logging
-import os
 import shutil
-import logging
+from collections.abc import Set
 from datetime import datetime, timedelta
-from typing import AbstractSet, Optional
+from pathlib import Path
+
 from pyvirtualdisplay import Display
 
-from src.config import JOB_FOLDER, JOB_RETENTION_DAYS, CLEANUP_INTERVAL_HOURS
-from src.core import state_manager as state 
+from src.config import CLEANUP_INTERVAL_HOURS, JOB_FOLDER, JOB_RETENTION_DAYS
+from src.core import state_manager as state
 
-_display_available = True
-_display: Optional[Display] = None
+logger = logging.getLogger(__name__)
+
+_display: Display | None = None
+
 
 def start_display() -> bool:
-    """가상 디스플레이 시작 (Linux 환경, pyvirtualdisplay 설치 시)"""
+    """Start the Xephyr display used by the shared headful browser."""
     global _display
-    if not _display_available or Display is None:
-        logging.debug("Virtual display not available or not installed.")
+
+    if _display is not None:
+        logger.warning("Virtual display is already running.")
+        return True
+
+    logger.info("Starting virtual display.")
+    try:
+        display = Display(visible=1, backend="xephyr", size=(1920, 1080))
+        display.start()
+    except Exception:
+        logger.exception("Could not start the virtual display.")
         return False
 
-    if _display:
-        logging.warning("Virtual display already started.")
-        return True
+    _display = display
+    logger.info("Virtual display started.")
+    return True
+
+
+def stop_display() -> None:
+    """Stop the current virtual display, if one was started."""
+    global _display
+
+    display, _display = _display, None
+    if display is None:
+        return
+
+    logger.info("Stopping virtual display.")
+    try:
+        display.stop()
+    except Exception:
+        logger.exception("Failed to stop the virtual display.")
+    else:
+        logger.info("Virtual display stopped.")
+
+
+def clean_old_jobs(excluded_job_ids: Set[str] = frozenset()) -> list[str]:
+    """Delete expired inactive job directories and return their job IDs."""
+    cutoff = datetime.now() - timedelta(days=JOB_RETENTION_DAYS)
+    job_root = Path(JOB_FOLDER)
+    logger.info(
+        "Deleting inactive job directories older than %s from %s", cutoff.isoformat(), job_root
+    )
 
     try:
-        logging.info("Starting virtual display...")
-        _display = Display(visible=1, backend="xephyr",  size=(1920, 1080)) # visible=0 for headless
-        _display.start()
-        logging.info("Virtual display started successfully.")
-        return True
-    except Exception as e:
-        # 디스플레이 시작 실패는 경고로 처리하고 계속 진행
-        logging.warning(f"Could not initialize/start virtual display: {e}. Running without it.")
-        _display = None
-        return False
-
-def stop_display():
-    """가상 디스플레이 종료"""
-    global _display
-    if _display:
-        logging.info("Stopping virtual display...")
-        try:
-            _display.stop()
-            logging.info("Virtual display stopped.")
-        except Exception as e:
-            logging.error(f"Failed to stop virtual display: {e}")
-        _display = None # 종료 후 None으로 설정
-
-def clean_old_jobs(excluded_job_ids: AbstractSet[str] = frozenset()) -> list[str]:
-    """Delete old job folders and return their IDs for event-loop state cleanup."""
-    cutoff = datetime.now() - timedelta(days=JOB_RETENTION_DAYS)
-    logging.info(f"Running cleanup for jobs older than {cutoff.isoformat()} in {JOB_FOLDER}")
-
-    if not os.path.exists(JOB_FOLDER):
-        logging.debug(f"Job folder {JOB_FOLDER} does not exist. Skipping cleanup.")
+        job_directories = list(job_root.iterdir())
+    except FileNotFoundError:
+        logger.debug("Job directory %s does not exist; cleanup is not needed.", job_root)
+        return []
+    except OSError:
+        logger.exception("Could not list job directory %s during cleanup.", job_root)
         return []
 
-    deleted_job_ids = []
-    try:
-        for item_name in os.listdir(JOB_FOLDER):
-            if item_name in excluded_job_ids:
-                continue
-            item_path = os.path.join(JOB_FOLDER, item_name)
-            try:
-                if os.path.isdir(item_path): 
-                    mod_time = datetime.fromtimestamp(os.path.getmtime(item_path))
-                    if mod_time < cutoff:
-                        logging.info(f"Deleting old job folder: {item_path} (modified: {mod_time})")
-                        shutil.rmtree(item_path)
-                        deleted_job_ids.append(item_name)
-            except FileNotFoundError:
-                 logging.warning(f"File not found during cleanup scan: {item_path}")
-                 continue # 다음 파일/폴더로 진행
-            except Exception as e:
-                logging.error(f"Error processing item {item_path} during cleanup: {e}")
-    except Exception as e:
-         logging.error(f"Error listing directory {JOB_FOLDER} during cleanup: {e}")
+    deleted_job_ids: list[str] = []
+    for job_directory in job_directories:
+        job_id = job_directory.name
+        if job_id in excluded_job_ids:
+            continue
 
+        try:
+            if not job_directory.is_dir():
+                continue
+            modified_at = datetime.fromtimestamp(job_directory.stat().st_mtime)
+            if modified_at >= cutoff:
+                continue
+            logger.info(
+                "Deleting expired job directory %s (modified %s)", job_directory, modified_at
+            )
+            shutil.rmtree(job_directory)
+        except FileNotFoundError:
+            logger.debug("Job directory disappeared during cleanup: %s", job_directory)
+            continue
+        except OSError:
+            logger.exception("Could not delete job directory %s.", job_directory)
+            continue
+
+        deleted_job_ids.append(job_id)
 
     return deleted_job_ids
 
 
-async def periodic_cleanup():
-    """주기적으로 오래된 작업 정리"""
-    logging.info("Periodic cleanup task started.")
+async def periodic_cleanup() -> None:
+    """Periodically delete expired inactive job data and matching runtime state."""
+    logger.info("Periodic job cleanup started.")
+    sleep_seconds = CLEANUP_INTERVAL_HOURS * 3600
+
     while True:
         try:
             active_job_ids = await state.get_active_job_ids()
             deleted_job_ids = await asyncio.to_thread(clean_old_jobs, active_job_ids)
             for job_id in deleted_job_ids:
                 await state.remove_job_state(job_id)
-        except Exception as e:
-            logging.error(f"Error during periodic cleanup execution: {e}", exc_info=True)
-
-        # 다음 실행까지 대기
-        sleep_duration = CLEANUP_INTERVAL_HOURS * 3600
-        logging.debug(f"Periodic cleanup finished. Sleeping for {sleep_duration} seconds.")
-        await asyncio.sleep(sleep_duration)
-
-def ensure_job_folder():
-    """JOB_FOLDER 존재 확인 및 생성"""
-    if not os.path.exists(JOB_FOLDER):
-        logging.info(f"Job folder {JOB_FOLDER} not found. Creating...")
-        try:
-            os.makedirs(JOB_FOLDER)
-            logging.info(f"Created job folder: {JOB_FOLDER}")
-        except OSError as e:
-            logging.error(f"Failed to create job folder {JOB_FOLDER}: {e}")
+        except asyncio.CancelledError:
             raise
+        except Exception:
+            logger.exception("Periodic job cleanup failed.")
+
+        logger.debug("Periodic job cleanup finished; sleeping for %s seconds.", sleep_seconds)
+        await asyncio.sleep(sleep_seconds)
+
+
+def ensure_job_folder() -> None:
+    """Create the configured job root when it does not exist."""
+    job_root = Path(JOB_FOLDER)
+    try:
+        job_root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.exception("Could not create job directory %s.", job_root)
+        raise

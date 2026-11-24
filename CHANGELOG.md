@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.2] - 2026-11-24
+
+### Changed
+
+- Split job submission, download validation, worker execution, persisted-state recovery, and application lifecycle into explicit feature-local steps with domain-specific names.
+- Separated runtime and development dependencies, added Ruff as a locked development tool, and aligned local validation with CI.
+- Replaced generated repository boilerplate with concise contributor, repository, ignore, and deployment guidance.
+- Pinned CI and deployment actions, installed locked runtime dependencies for production, and made the systemd unit run the project virtual environment directly. Deployments use the exact validated commit.
+
+### Fixed
+
+- Removed import-time configuration output and made cleanup-boundary failures consistently observable through module loggers.
+- Made both bundled clients reject unsafe server-controlled filenames and stream downloads through atomically replaced temporary files.
+- Updated vulnerable locked dependencies and added regression checks for dynamic script imports and isolated test storage.
+- Removed the duplicate `dotenv` dependency and the unused `FileInfo` model.
+
 ## [0.4.1] - 2026-08-15
 
 ### Changed

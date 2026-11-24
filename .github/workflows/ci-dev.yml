@@ -1,49 +1,53 @@
-name: Dev Docker Image CICD
+name: CI
 
 on:
   push:
-    branches: [ "dev", "main" ]
+    branches: ["dev", "main"]
   pull_request:
   workflow_dispatch:
 
-jobs:
+permissions:
+  contents: read
 
-  build:
+jobs:
+  quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_ALARM }}
 
     steps:
-      - name: Check out the repository
-        uses: actions/checkout@v4 # 최신 버전 사용
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
-          cache-suffix: "optional-suffix" 
+          python-version: "3.11"
 
-      - name: Set up Python
-        run: uv python install 3.11
+      - name: Install locked dependencies
+        run: uv sync --locked
 
-      - name: Install dependencies
-        run: uv sync
+      - name: Lint
+        run: uv run ruff check src tests example
 
-      - name: Install Playwright browsers
-        run: uv run python -m playwright install --with-deps chromium
+      - name: Check formatting
+        run: uv run ruff format --check src tests example
 
-      - name: Run tests with pytest
-        run: |
-          # 필요한 환경 변수 설정 (테스트 환경용 .env 파일 사용 또는 직접 설정)
-          # export SOME_TEST_VARIABLE=test_value
-          uv run pytest -q
+      - name: Run tests
+        run: uv run pytest -q
 
-      - name: action-slack
-        uses: 8398a7/action-slack@v3
+      - name: Build package
+        run: uv build
+
+      - name: Notify Slack
+        if: ${{ always() && env.SLACK_WEBHOOK_URL != '' }}
+        uses: slackapi/slack-github-action@0d95c9a7becc1e6e297d76df9bc735c44f4cbcbc # v3.0.5
         with:
-          status: ${{ job.status }}
-          author_name: Gibhub Actions - build
-          fields: repo,commit,message,author # action,eventName,ref,workflow,job,took 추가할 수 있음
-          mention: here
-          if_mention: failure,cancelled
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_ALARM }} # required
-        if: always() # Pick up events even if the job fails or is canceled.
+          webhook: ${{ env.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "CI ${{ job.status }} · ${{ github.repository }} · ${{ github.ref_name }} · <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|workflow run>"
+            }

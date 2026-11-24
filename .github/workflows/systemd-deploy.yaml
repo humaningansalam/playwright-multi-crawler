@@ -1,107 +1,194 @@
-name: Deploy playwight-multi-crawler systemd
+name: Deploy systemd service
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: playwright-multi-crawler-production
   cancel-in-progress: false
 
 jobs:
-  test:
+  quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-      - run: uv python install 3.11
-      - run: uv sync
-      - run: uv run pytest -q
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          python-version: "3.11"
+
+      - name: Install locked dependencies
+        run: uv sync --locked
+
+      - name: Validate project
+        run: |
+          uv run ruff check src tests example
+          uv run ruff format --check src tests example
+          uv run pytest -q
+          uv build
 
   deploy:
-    needs: test
+    if: github.ref == 'refs/heads/main'
+    needs: quality
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - name: Check out the repository
-        uses: actions/checkout@v2
-
-      - name: Deploy to server
-        uses: appleboy/ssh-action@v1
+      - name: Deploy to production server
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_USER: ${{ secrets.SERVER_USER }}
+          REPOSITORY: ${{ github.repository }}
+          DEPLOY_SHA: ${{ github.sha }}
+          SERVER_PORT: ${{ vars.SERVER_PORT }}
+          DISPLAY_VALUE: ${{ vars.DISPLAY }}
+          APP_NAME: ${{ vars.APP_NAME }}
+          APP_ENV: ${{ vars.APP_ENV }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          fingerprint: ${{ secrets.SERVER_SSH_FINGERPRINT }}
+          command_timeout: 20m
+          envs: DEPLOY_PATH,DEPLOY_USER,REPOSITORY,DEPLOY_SHA,SERVER_PORT,DISPLAY_VALUE,APP_NAME,APP_ENV,LOG_LEVEL
           script: |
-            
-            set -e  # 에러 발생 시 중단
+            set -Eeuo pipefail
 
-            # 배포 폴더로 이동 및 코드 업데이트
-            export PATH="$HOME/.local/bin:$PATH"  # 환경 변수 추가
-            mkdir -p ${{ secrets.DEPLOY_PATH }}
-            cd ${{ secrets.DEPLOY_PATH }}
+            DEPLOY_PATH="${DEPLOY_PATH:?DEPLOY_PATH is required}"
+            DEPLOY_USER="${DEPLOY_USER:?DEPLOY_USER is required}"
+            REPOSITORY="${REPOSITORY:?REPOSITORY is required}"
+            DEPLOY_SHA="${DEPLOY_SHA:?DEPLOY_SHA is required}"
+            SERVER_PORT="${SERVER_PORT:-5000}"
+            DISPLAY_VALUE="${DISPLAY_VALUE:-:0}"
+            APP_NAME="${APP_NAME:-playwright-runner}"
+            APP_ENV="${APP_ENV:-production}"
+            LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
-            if [ ! -d ".git" ]; then
-              git clone https://github.com/${{ github.repository }}.git .
+            [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || {
+              echo "DEPLOY_PATH must be an absolute path without spaces." >&2
+              exit 1
+            }
+            [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || {
+              echo "DEPLOY_USER contains unsupported characters." >&2
+              exit 1
+            }
+            [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+              echo "REPOSITORY is invalid." >&2
+              exit 1
+            }
+            if ! [[ "$SERVER_PORT" =~ ^[0-9]{1,5}$ ]] || (( SERVER_PORT < 1 || SERVER_PORT > 65535 )); then
+              echo "SERVER_PORT must be between 1 and 65535." >&2
+              exit 1
+            fi
+            [[ "$DISPLAY_VALUE" =~ ^:[0-9]+(\.[0-9]+)?$ ]] || {
+              echo "DISPLAY must look like :0 or :0.0." >&2
+              exit 1
+            }
+            [[ "$APP_NAME" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+              echo "APP_NAME contains unsupported characters." >&2
+              exit 1
+            }
+            [[ "$APP_ENV" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+              echo "APP_ENV contains unsupported characters." >&2
+              exit 1
+            }
+            [[ "$LOG_LEVEL" =~ ^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$ ]] || {
+              echo "LOG_LEVEL is invalid." >&2
+              exit 1
+            }
+            [[ "$(id -un)" == "$DEPLOY_USER" ]] || {
+              echo "SSH user and DEPLOY_USER must match." >&2
+              exit 1
+            }
+
+            export PATH="$HOME/.local/bin:$PATH"
+            command -v git >/dev/null
+            command -v curl >/dev/null
+            command -v sudo >/dev/null
+            command -v uv >/dev/null
+
+            mkdir -p -- "$DEPLOY_PATH"
+            cd -- "$DEPLOY_PATH"
+
+            if [[ ! -d .git ]]; then
+              if [[ -n "$(find . -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+                echo "DEPLOY_PATH is not empty and is not a Git repository." >&2
+                exit 1
+              fi
+              git clone --no-checkout --branch main --single-branch "https://github.com/${REPOSITORY}.git" .
             else
-              git fetch --all
-              git reset --hard origin/main 
+              git fetch --prune origin main
             fi
 
-            # .env 파일 생성
-            echo "PORT=${{ vars.SERVER_PORT }}" > ${{ secrets.DEPLOY_PATH }}/.env
-            echo "DISPLAY=${{ vars.DISPLAY }}" >> ${{ secrets.DEPLOY_PATH }}/.env
-            echo "APP_NAME=${{ vars.APP_NAME }}" >> ${{ secrets.DEPLOY_PATH }}/.env
-            echo "APP_ENV=${{ vars.APP_ENV }}" >> ${{ secrets.DEPLOY_PATH }}/.env
-            echo "LOG_LEVEL=${{ vars.LOG_LEVEL }}" >> ${{ secrets.DEPLOY_PATH }}/.env
+            [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$DEPLOY_SHA" origin/main || {
+              echo "Validated deployment revision is not on origin/main." >&2
+              exit 1
+            }
+            git reset --hard "$DEPLOY_SHA"
 
-            # 실행 권한 부여
-            chmod +x ./config/install_dependencies.sh
-            ./config/install_dependencies.sh
+            umask 077
+            touch .env
+            chmod 600 .env
+            cat > .env <<EOF
+            PORT=$SERVER_PORT
+            DISPLAY=$DISPLAY_VALUE
+            APP_NAME=$APP_NAME
+            APP_ENV=$APP_ENV
+            LOG_LEVEL=$LOG_LEVEL
+            EOF
 
-            # systemd 서비스 파일 생성
-            echo "[Unit]
-            Description=Playwright Multi Crawler Service
-            After=network.target graphical.target
+            bash ./config/install_dependencies.sh
+
+            sudo tee /etc/systemd/system/playwright-multi-crawler.service >/dev/null <<EOF
+            [Unit]
+            Description=Playwright Multi Crawler
+            Wants=network-online.target
+            After=network-online.target graphical.target
+            StartLimitIntervalSec=60
+            StartLimitBurst=5
 
             [Service]
             Type=simple
-            User=${{ secrets.SERVER_USER }}
-            WorkingDirectory=${{ secrets.DEPLOY_PATH }}
-            ExecStart=/home/${{ secrets.SERVER_USER }}/.local/bin/uv run python -m src.main
+            User=$DEPLOY_USER
+            WorkingDirectory=$DEPLOY_PATH
+            EnvironmentFile=$DEPLOY_PATH/.env
+            Environment=PYTHONUNBUFFERED=1
+            ExecStart=$DEPLOY_PATH/.venv/bin/python -m src.main
             KillMode=mixed
+            TimeoutStopSec=45
             Restart=on-failure
-            RestartSec=10  
-            StartLimitInterval=30
-            StartLimitBurst=5  
+            RestartSec=10
 
             [Install]
-            WantedBy=graphical.target" | sudo tee /etc/systemd/system/playwright-multi-crawler.service
+            WantedBy=graphical.target
+            EOF
 
-            # systemd 데몬 다시 로드하고 서비스 시작
             sudo systemctl daemon-reload
-            sudo systemctl reenable playwright-multi-crawler
-            sudo systemctl restart playwright-multi-crawler
+            sudo systemctl reenable playwright-multi-crawler.service
+            sudo systemctl restart playwright-multi-crawler.service
 
-            if ! sudo systemctl is-active --quiet playwright-multi-crawler; then
-              echo "Service did not become active after restart."
-              sudo systemctl status playwright-multi-crawler --no-pager || true
-              exit 1
-            fi
-
-            readiness_url="http://127.0.0.1:${{ vars.SERVER_PORT }}/health"
+            readiness_url="http://127.0.0.1:${SERVER_PORT}/health"
             for attempt in $(seq 1 30); do
-              if curl --fail --silent --show-error --max-time 2 "$readiness_url"; then
+              if curl --fail --silent --show-error --max-time 2 "$readiness_url" >/dev/null; then
                 echo "Service readiness check passed on attempt $attempt."
-                break
+                exit 0
               fi
-
-              if [ "$attempt" -eq 30 ]; then
-                echo "Service did not become ready within 30 seconds."
-                sudo systemctl status playwright-multi-crawler --no-pager || true
-                exit 1
-              fi
-
               sleep 1
             done
+
+            echo "Service did not become ready within 30 seconds." >&2
+            sudo systemctl status playwright-multi-crawler.service --no-pager || true
+            sudo journalctl -u playwright-multi-crawler.service -n 100 --no-pager || true
+            exit 1

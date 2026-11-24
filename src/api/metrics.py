@@ -2,10 +2,8 @@ from fastapi import APIRouter, Response
 from fastapi.responses import PlainTextResponse
 from prometheus_client import generate_latest
 
-router = APIRouter(
-    prefix="/metrics",
-    tags=["Monitoring"]
-)
+router = APIRouter(prefix="/metrics", tags=["Monitoring"])
+
 
 @router.get(
     "",
@@ -13,17 +11,10 @@ router = APIRouter(
     responses={
         200: {
             "description": "Prometheus metrics payload",
-            "content": {
-                "text/plain": {
-                    "schema": {"type": "string"}
-                }
-            },
+            "content": {"text/plain": {"schema": {"type": "string"}}},
         }
     },
 )
-async def metrics_endpoint():
-    """
-    Exposes Prometheus metrics.
-    Scraped by Prometheus server.
-    """
+async def metrics_endpoint() -> Response:
+    """Return the current Prometheus exposition payload."""
     return Response(content=generate_latest(), media_type="text/plain")

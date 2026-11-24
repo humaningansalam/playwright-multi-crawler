@@ -20,7 +20,7 @@ def test_readme_submit_example_does_not_require_missing_additional_file():
     readme = Path(__file__).resolve().parents[1] / "README.md"
     content = readme.read_text(encoding="utf-8")
 
-    assert '@textfile.txt' not in content
+    assert "@textfile.txt" not in content
     assert "example/input.json" not in content
 
 

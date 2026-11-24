@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Any, Dict, Literal, Optional, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
@@ -44,10 +44,10 @@ class CleanupFailure(BaseModel):
 class JobError(BaseModel):
     code: JobErrorCode
     message: str
-    traceback: Optional[str] = None
+    traceback: str | None = None
     cleanup_failures: list[CleanupFailure] = Field(default_factory=list)
-    exit_code: Optional[int] = None
-    timeout_seconds: Optional[int] = None
+    exit_code: int | None = None
+    timeout_seconds: int | None = None
     stdout: str = ""
     stderr: str = ""
     worker_result: Any = None
@@ -66,7 +66,10 @@ class WorkerFailed(BaseModel):
     error: JobError
 
 
-WorkerResult = Annotated[Union[WorkerCompleted, WorkerFailed], Field(discriminator="status")]
+WorkerResult: TypeAlias = Annotated[
+    WorkerCompleted | WorkerFailed,
+    Field(discriminator="status"),
+]
 WORKER_RESULT_ADAPTER = TypeAdapter(WorkerResult)
 JSON_VALUE_ADAPTER = TypeAdapter(JsonValue)
 
@@ -83,13 +86,13 @@ class JobRecord(BaseModel):
     job_path: str
     status: JobStatus = JobStatus.PENDING
     result: Any = None
-    logs: Optional[Dict[str, str]] = None
+    logs: dict[str, str] | None = None
     submitted_at: datetime = Field(default_factory=datetime.now)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    queue_wait_seconds: Optional[float] = None
-    run_duration_seconds: Optional[float] = None
-    duration_seconds: Optional[float] = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    queue_wait_seconds: float | None = None
+    run_duration_seconds: float | None = None
+    duration_seconds: float | None = None
 
 
 JOB_STATE_FILENAME = "state.json"
@@ -104,13 +107,13 @@ class PersistedJobStateV1(BaseModel):
     jobname: str
     status: JobStatus
     result: Any = None
-    logs: Optional[Dict[str, str]] = None
+    logs: dict[str, str] | None = None
     submitted_at: datetime
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    queue_wait_seconds: Optional[float] = None
-    run_duration_seconds: Optional[float] = None
-    duration_seconds: Optional[float] = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    queue_wait_seconds: float | None = None
+    run_duration_seconds: float | None = None
+    duration_seconds: float | None = None
 
 
 class ApiErrorCode(str, Enum):
@@ -133,7 +136,7 @@ class ApiErrorCode(str, Enum):
 class ApiErrorDetail(BaseModel):
     code: ApiErrorCode
     message: str
-    context: Dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 class ApiErrorResponse(BaseModel):
@@ -149,16 +152,11 @@ class JobSubmitResponse(BaseModel):
 class JobStatusResponse(BaseModel):
     job_id: str
     status: JobStatus
-    submitted_at: Optional[datetime] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    queue_wait_seconds: Optional[float] = None
-    run_duration_seconds: Optional[float] = None
-
-
-class FileInfo(BaseModel):
-    filename: str
-    url: str
+    submitted_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    queue_wait_seconds: float | None = None
+    run_duration_seconds: float | None = None
 
 
 class JobResultResponse(BaseModel):
@@ -167,16 +165,16 @@ class JobResultResponse(BaseModel):
     job_id: str
     status: JobStatus
     result: Any = None
-    logs: Optional[Dict[str, str]] = None
-    files: Optional[Dict[str, str]] = None
-    files_error: Optional[ApiErrorDetail] = None
-    jobname: Optional[str] = None
-    submitted_at: Optional[datetime] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    queue_wait_seconds: Optional[float] = None
-    run_duration_seconds: Optional[float] = None
-    duration_seconds: Optional[float] = None
+    logs: dict[str, str] | None = None
+    files: dict[str, str] | None = None
+    files_error: ApiErrorDetail | None = None
+    jobname: str | None = None
+    submitted_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    queue_wait_seconds: float | None = None
+    run_duration_seconds: float | None = None
+    duration_seconds: float | None = None
 
 
 class JobCompletedResponse(JobResultResponse):
@@ -198,14 +196,14 @@ class JobProcessingResponse(BaseModel):
 
     job_id: str
     status: Literal[JobStatus.PENDING, JobStatus.RUNNING]
-    submitted_at: Optional[datetime] = None
-    started_at: Optional[datetime] = None
-    queue_wait_seconds: Optional[float] = None
+    submitted_at: datetime | None = None
+    started_at: datetime | None = None
+    queue_wait_seconds: float | None = None
     message: str = "Job is still processing."
 
 
-JobResultsResponse = Annotated[
-    Union[JobProcessingResponse, JobCompletedResponse, JobErrorResponse],
+JobResultsResponse: TypeAlias = Annotated[
+    JobProcessingResponse | JobCompletedResponse | JobErrorResponse,
     Field(discriminator="status"),
 ]
 JOB_RESULTS_RESPONSE_ADAPTER = TypeAdapter(JobResultsResponse)
