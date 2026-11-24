@@ -7,7 +7,12 @@ from pathlib import Path
 
 from pyvirtualdisplay import Display
 
-from src.config import CLEANUP_INTERVAL_HOURS, JOB_FOLDER, JOB_RETENTION_DAYS
+from src.config import (
+    CLEANUP_INTERVAL_HOURS,
+    JOB_FOLDER,
+    JOB_RETENTION_DAYS,
+    VIRTUAL_DISPLAY_BACKEND,
+)
 from src.core import state_manager as state
 
 logger = logging.getLogger(__name__)
@@ -16,16 +21,24 @@ _display: Display | None = None
 
 
 def start_display() -> bool:
-    """Start the Xephyr display used by the shared headful browser."""
+    """Start an independent X display for the shared headful browser."""
     global _display
 
     if _display is not None:
         logger.warning("Virtual display is already running.")
         return True
 
-    logger.info("Starting virtual display.")
+    if VIRTUAL_DISPLAY_BACKEND not in {"xvfb", "xephyr"}:
+        logger.error("Unsupported virtual display backend: %s", VIRTUAL_DISPLAY_BACKEND)
+        return False
+
+    logger.info("Starting virtual display (%s).", VIRTUAL_DISPLAY_BACKEND)
     try:
-        display = Display(visible=1, backend="xephyr", size=(1920, 1080))
+        display = Display(
+            visible=int(VIRTUAL_DISPLAY_BACKEND == "xephyr"),
+            backend=VIRTUAL_DISPLAY_BACKEND,
+            size=(1920, 1080),
+        )
         display.start()
     except Exception:
         logger.exception("Could not start the virtual display.")

@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.5] - 2026-11-24
+
+### Fixed
+
+- Run headful Chromium on Xvfb by default without an interactive graphical session; keep Xephyr as an explicit local option and make the example systemd unit usable at multi-user boot.
+
 ## [0.4.4] - 2026-11-24
 
 ### Fixed

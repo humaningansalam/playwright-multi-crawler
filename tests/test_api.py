@@ -2345,6 +2345,8 @@ def test_systemd_deploy_serializes_production_updates():
     assert "ExecStart=/opt/playwright-multi-crawler/.venv/bin/python -m src.main" in service_content
     assert "KillMode=mixed" in service_content
     assert "uv sync --locked --no-dev" in installer_content
+    assert "xvfb xauth" in installer_content
+    assert "WantedBy=multi-user.target" in service_content
 
 
 @pytest.mark.asyncio

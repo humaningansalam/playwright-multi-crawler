@@ -6,12 +6,12 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
-printf '%s\n' 'Installing Xephyr...'
+printf '%s\n' 'Installing Xvfb and X authentication tools...'
 sudo apt-get update
 sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
     -y \
     --no-install-recommends \
-    xserver-xephyr
+    xvfb xauth
 
 printf '%s\n' 'Syncing locked runtime dependencies...'
 uv sync --locked --no-dev
