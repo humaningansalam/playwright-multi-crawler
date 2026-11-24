@@ -1,7 +1,7 @@
 [Unit]
 Description=Playwright Multi Crawler
 Wants=network-online.target
-After=network-online.target graphical.target
+After=network-online.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
@@ -18,4 +18,4 @@ Restart=on-failure
 RestartSec=10
 
 [Install]
-WantedBy=graphical.target
+WantedBy=multi-user.target

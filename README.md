@@ -14,15 +14,13 @@ Playwright 기반 작업을 HTTP API로 제출하고, 공유 Chromium 브라우�
 - Python 3.11 이상
 - uv
 - Playwright 1.61 이상 (Ubuntu 26.04 ARM64 지원) 및 Chromium 실행에 필요한 OS 패키지
-- headful Chromium을 위한 Xephyr (`xserver-xephyr`)
+- GUI 세션 없이 headful Chromium을 실행할 Xvfb (`xvfb`, `xauth`)
 
 ## 설치 및 실행 방법
 
 ```bash
-# 패키지 설치
-uv sync
-uv run python -m playwright install-deps
-uv run python -m playwright install chromium
+# 시스템 및 runtime 패키지 설치
+bash config/install_dependencies.sh
 
 # 서버 실행
 uv run python -m src.main
@@ -203,7 +201,8 @@ Prometheus-compatible runtime metrics는 `GET /metrics`에서 조회할 수 있�
 | `CLEANUP_INTERVAL_HOURS` | `24` | retention cleanup 실행 간격(시간) |
 | `UVICORN_RELOAD` | `false` | 개발용 Uvicorn reload 활성화 |
 | `TZ` | `Asia/Seoul` | 서비스 시간대 |
-| `DISPLAY` | unset | Xephyr가 연결할 상위 X display. 배포 workflow 기본값은 `:0`입니다. |
+| `VIRTUAL_DISPLAY_BACKEND` | `xvfb` | 독립 가상 디스플레이. 로컬 GUI에서만 `xephyr` 선택 가능 |
+| `DISPLAY` | unset | 선택한 Xephyr가 연결할 상위 X display. Xvfb에는 불필요 |
 | `PLAYWRIGHT_BROWSERS_PATH` | Playwright 기본값 | Chromium 설치 및 조회 경로 |
 | `APP_NAME` | `playwright-runner` | 로그/모니터링 애플리케이션 이름 |
 | `APP_ENV` | `dev` | 로그/모니터링 환경 이름 |
@@ -226,9 +225,9 @@ GitHub Actions에는 다음 repository secret이 필요합니다.
 다음 repository variable은 선택 사항입니다. 비어 있으면 괄호 안의 기본값을 사용합니다.
 
 - `SERVER_PORT` (`5000`)
-- `DISPLAY` (`:0`)
+- `DISPLAY` (`:0`; 기존 workflow 호환 변수이며 기본 Xvfb에는 사용되지 않음)
 - `APP_NAME` (`playwright-runner`)
 - `APP_ENV` (`production`)
 - `LOG_LEVEL` (`INFO`)
 
-원격 서버에는 `git`, `curl`, `uv`, 비대화형 `sudo` 권한이 필요합니다. workflow는 `origin/main`에 포함된 검증 대상 커밋을 배포하고, 권한 `0600`의 `.env`를 작성한 뒤 `example/playwright-multi-crawler.service`와 같은 실행 계약으로 서비스를 설치합니다. 서비스 재시작 뒤 최대 30회(1초 간격)로 `/health`를 확인하며, 실패하면 systemd 상태와 최근 journal을 출력하고 배포 job을 실패시킵니다.
+원격 서버에는 `git`, `curl`, `uv`, 비대화형 `sudo` 권한이 필요합니다. workflow는 `origin/main`에 포함된 검증 대상 커밋을 배포하고, 권한 `0600`의 `.env`를 작성한 뒤 `example/playwright-multi-crawler.service`와 같은 실행 계약으로 서비스를 설치합니다. systemd 서비스의 기본 Xvfb 런타임은 GUI 세션이나 호스트 `DISPLAY`에 의존하지 않습니다. 예제 unit은 `multi-user.target`을 사용합니다. 기존 workflow가 생성하는 unit의 부팅 대상은 아직 `graphical.target`입니다. 로컬에서 화면을 직접 확인하려면 `xserver-xephyr`를 추가 설치하고 실제 X 세션에서 `VIRTUAL_DISPLAY_BACKEND=xephyr`로 실행할 수 있습니다. 서비스 재시작 뒤 최대 30회(1초 간격)로 `/health`를 확인하며, 실패하면 systemd 상태와 최근 journal을 출력하고 배포 job을 실패시킵니다.
