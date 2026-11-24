@@ -13,7 +13,7 @@ Playwright 기반 작업을 HTTP API로 제출하고, 공유 Chromium 브라우�
 
 - Python 3.11 이상
 - uv
-- Playwright Chromium 실행에 필요한 OS 패키지
+- Playwright 1.61 이상 (Ubuntu 26.04 ARM64 지원) 및 Chromium 실행에 필요한 OS 패키지
 - headful Chromium을 위한 Xephyr (`xserver-xephyr`)
 
 ## 설치 및 실행 방법

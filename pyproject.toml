@@ -1,6 +1,6 @@
 [project]
 name = "playwright-multi-crawler"
-version = "0.4.3"
+version = "0.4.4"
 description = "Submit and run isolated Playwright automation jobs through a FastAPI service."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -8,7 +8,7 @@ dependencies = [
     "fastapi>=0.165.0",
     "his-monitoring @ git+https://github.com/humaningansalam/his-monitoring.git@1ca4734971cf03862de43276a6d54d45d14932ea",
     "httpx>=0.28.1",
-    "playwright>=1.56.0",
+    "playwright>=1.61,<2",
     "pydantic>=2,<3",
     "python-dotenv>=1.2.4",
     "python-multipart>=0.0.34",
